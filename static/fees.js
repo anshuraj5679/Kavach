@@ -18,6 +18,6 @@
       <tbody>${r.data.rows.map((x) => `<tr>
         <td class="mono">${esc(x.challan_no)}</td><td>${fmtDate(x.date)}</td><td>${esc(x.mode)}</td>
         <td class="num">${rupees(x.amount)}</td>
-        <td style="text-align:right"><a class="btn btn-ghost btn-sm" href="/fees/receipt?userId=${encodeURIComponent(r.data.roll)}&challan=${encodeURIComponent(x.challan_no)}">Generate receipt</a></td>
+        <td style="text-align:right"><a class="btn btn-ghost btn-sm" data-kavach-download="receipt" href="/api/fees/receipt/download?userId=${encodeURIComponent(r.data.roll)}&challan=${encodeURIComponent(x.challan_no)}" download="receipt-${esc(x.challan_no)}.pdf">Generate receipt</a></td>
       </tr>`).join("")}</tbody></table></div>`;
 })();

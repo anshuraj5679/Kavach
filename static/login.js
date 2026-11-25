@@ -10,6 +10,15 @@
     msg.innerHTML = alertBox("warn", "<strong>Kavach ended your session.</strong> It was used from another device, sat idle too long, or came from an untrusted device on a new network. Please sign in again.");
   }
 
+  if (params.get("kavach") === "extension") {
+    let names = [];
+    try { names = JSON.parse(sessionStorage.getItem("kavach_ext") || "[]"); sessionStorage.removeItem("kavach_ext"); } catch (e) { /* ignore */ }
+    const what = names.length ? `a browser extension (<strong>${names.map(esc).join(", ")}</strong>)` : "a browser extension";
+    msg.innerHTML = alertBox("warn", `<strong>Kavach signed you out.</strong> ${what} was connected to the portal page ` +
+      "after you logged in. Extensions that touch the page can read your marks, fees and ID details. " +
+      "Keep it off while you use the portal, then sign in again.");
+  }
+
   document.querySelectorAll(".reveal").forEach((b) => b.addEventListener("click", () => {
     const input = document.getElementById(b.getAttribute("aria-controls"));
     const show = input.type === "password";

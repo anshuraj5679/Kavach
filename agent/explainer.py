@@ -67,6 +67,15 @@ ROOT_CAUSES = {
         "safe": "fails[(ip, device)] += 1   # throttle the attacker's device, never the account\n"
                 "# plus: real passwords (argon2 hashes) and an OTP as the second factor",
     },
+    "download_link": {
+        "weak_spot": "WEAK SPOT #4b / #6 (portable download links)", "file": "app/portal.py",
+        "function": "api_fee_receipt_download, api_acknowledgement_download",
+        "problem": "Receipt and acknowledgement downloads are plain GET links, so they work in any tab or site they are "
+                   "dragged or pasted into.",
+        "unsafe": 'href="/api/acknowledgement/download?userId=101&sem=5"   # works anywhere',
+        "safe": "ticket = issue(session, path, s.roll, doc_id)   # one-time, bound to session + document\n"
+                "fetch(url, {headers: {'X-Kavach-Ticket': ticket}})   # refuse downloads without it",
+    },
     "session_hijack": {
         "weak_spot": "WEAK SPOT #5c (sessions not bound to a device, never expire)", "file": "app/auth.py",
         "function": "current_session",
@@ -80,7 +89,9 @@ TYPE_LABELS = {
     "idor_scrape": "Results scraping (IDOR)", "private_exposure": "Private record exposure",
     "overexposure": "Over-exposure of personal data", "mass_dump": "Mass data dump",
     "sqli": "SQL injection", "receipt_idor": "Fee-receipt IDOR", "login_attack": "Credential guessing / lockout attack",
-    "session_hijack": "Session hijack",
+    "session_hijack": "Session hijack", "extension": "Browser extension in a logged-in session",
+    "download_link": "Protected download link moved out of the portal",
+    "idor_probe": "URL tampering: another student's ID in the link",
 }
 
 

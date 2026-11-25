@@ -31,6 +31,20 @@ BRANCHES = {
     "CV": "Civil Engineering",
     "AIML": "AI & Machine Learning",
 }
+# Course registration for the acknowledgement form (odd semester, A.Y. 2026-27).
+# Course codes, names and credits only: no student data.
+REGISTRATION = {"term": "Odd Semester of A.Y. 2026-2027", "semester": 5, "stream": "B.E"}
+COURSES = [
+    ("Professional Core Courses", "BCS501", "Software Engineering & Project Management", 3),
+    ("Professional Core Courses", "BCS502", "Computer Networks", 4),
+    ("Professional Core Courses", "BCS503", "Theory of Computation", 4),
+    ("Professional Core Courses", "BCSL504", "Web Technology Laboratory", 1),
+    ("Professional Core Courses", "BRMK507", "Research Methodology and IPR", 2),
+    ("Professional Core Courses", "BCS506", "Mini Project", 3),
+    ("Professional Core Courses", "BCSP508", "Environmental Science Project", 1),
+    ("Professional Elective Courses", "BCS505B", "Artificial Intelligence", 3),
+    ("Professional Open Elective Courses", "BCUK509", "Cultural", 0),
+]
 SUBJECTS = {
     1: ["Engineering Mathematics I", "Engineering Physics", "Basic Electrical", "C Programming", "English"],
     2: ["Engineering Mathematics II", "Engineering Chemistry", "Elements of Mechanical", "Python Lab", "Constitution of India"],

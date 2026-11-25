@@ -16,7 +16,7 @@ from fastapi import Request
 from starlette.responses import Response
 
 from app import auth, db
-from . import actions, config, detector, inspector, ledger, notify, scanner
+from . import actions, config, detector, inspector, ledger, linkguard, notify, scanner
 
 DEVICE_RX = re.compile(r"^[A-Za-z0-9_-]{20,40}$")
 DEVICE_MAX_AGE = 400 * 24 * 3600
@@ -138,23 +138,27 @@ async def _guard(request: Request, call_next, ip: str, device: str, path: str):
     mm = inspector.ownership_mismatch(path, request, session)
     if mm:
         detector.hit("target", roll, tag=mm["requested"])
+        if config.OWNERSHIP_ZERO_TOLERANCE:
+            return _ownership_blocked(request, path, ip, device, actor_key, actor, who, mm)
         if path in config.ZERO_TOLERANCE_ENDPOINTS:
             n = detector.hit("receipt_idor", actor_key)
-            inc = ledger.incident("receipt_idor", actor_key, "Fee-receipt IDOR: reading another student's receipt", path, actor)
+            doc = config.PROTECTED_DOWNLOADS.get(path, {}).get("doc", "fee receipt")
+            inc = ledger.incident("receipt_idor", actor_key, f"{doc.capitalize()} IDOR: reading another student's {doc}",
+                                  path, actor)
             codes = ["receipt_idor"] + (["foreign_over_limit"] if n >= config.RECEIPT_IDOR_LIMIT else [])
             risk, sev = detector.score(codes)
-            action = "Request refused (403) before the receipt was read"
+            action = f"Request refused (403) before the {doc} was read"
             if n >= config.RECEIPT_IDOR_LIMIT:
-                actions.block_actor(ip, device, f"{n} attempts to read other students' fee receipts", inc)
+                actions.block_actor(ip, device, f"{n} attempts to read other students' {doc}s", inc)
                 action += "; IP + device blocked 15 min"
             ledger.update_incident(inc, risk=risk, severity=sev, action=action, protected=1, actor=actor, reasons=[
-                f"{who} changed userId to {mm['requested']} on the receipt link (own id is {mm['own']})",
-                "Fee receipts are financial documents: zero tolerance for foreign access",
+                f"{who} changed userId to {mm['requested']} on the {doc} link (own id is {mm['own']})",
+                f"{doc.capitalize()}s hold personal records: zero tolerance for foreign access",
             ], evidence=[{"asked_for": mm["requested"], "own": mm["own"]}])
             ledger.bump("blocked")
             ledger.bump("protected")
-            ledger.event("block", f"Receipt IDOR: {who} asked for userId={mm['requested']}, refused", inc["id"])
-            return actions.blocked_response(request, f"Receipt {mm['requested']} does not belong to the logged-in student.",
+            ledger.event("block", f"{doc.capitalize()} IDOR: {who} asked for userId={mm['requested']}, refused", inc["id"])
+            return actions.blocked_response(request, f"That {doc} ({mm['requested']}) does not belong to the logged-in student.",
                                             inc["id"], code="ownership")
         flagged = ledger.incident("idor_scrape", f"roll:{roll}", f"Results scraping by {who} via ?{mm['param']}=", path, actor)
         seen = detector.count("foreign", roll)
@@ -169,6 +173,31 @@ async def _guard(request: Request, call_next, ip: str, device: str, path: str):
             ledger.bump("blocked")
             ledger.bump("protected")
             return actions.blocked_response(request, "Too many requests for other students' records.", flagged["id"], code="scrape")
+
+    # ---- 3b. protected downloads: only through the page's own button ----------
+    # The real download URL never appears on the page while the agent is ON. A click
+    # gets a one-time ticket bound to this session and document (agent/linkguard.py).
+    # A link opened in another tab or site, or pasted, carries no ticket.
+    dl = config.PROTECTED_DOWNLOADS.get(path)
+    if dl:
+        ref = request.query_params.get(dl["ref"], "")
+        ok, why = linkguard.redeem(request.headers.get("x-kavach-ticket"), token, path,
+                                   request.query_params.get("userId", ""), ref)
+        if not ok:
+            inc = ledger.incident("download_link", actor_key,
+                                  f"{dl['doc'].capitalize()} link opened outside the {dl['page']} page by {who}", path, actor)
+            risk, sev = detector.score(["download_link"])
+            ledger.update_incident(inc, risk=risk, severity=sev, protected=1, actor=actor,
+                                   action=f"Download refused: {dl['doc']} links only work from the {dl['button']} button",
+                                   reasons=[why, f"Requested {dl['doc']} {ref or '?'} "
+                                                 f"(userId {request.query_params.get('userId', '?')})"])
+            ledger.bump("blocked")
+            ledger.bump("protected")
+            ledger.event("block", f"{dl['doc'].capitalize()} download refused for {who} from {ip}: no valid tab ticket",
+                         inc["id"], dedupe=False)
+            return actions.blocked_response(request, f"This {dl['doc']} link only works from the {dl['button']} button "
+                                            f"on the {dl['page']} page. Kavach refuses download links that were moved "
+                                            f"to another tab or website.", inc["id"], code="download_link")
 
     # ---- 4. the portal (and its database) --------------------------------------
     resp = await call_next(request)
@@ -265,6 +294,42 @@ async def _guard(request: Request, call_next, ip: str, device: str, path: str):
 
 
 # ------------------------------------------------------------------------- helpers
+def _ownership_blocked(request: Request, path: str, ip: str, device: str, actor_key: str, actor: dict,
+                       who: str, mm: dict):
+    """Zero tolerance: someone else's roll / userId in the link. Refuse before anything is read,
+    block the IP + device, and tell the IT head and the record's owner."""
+    kind, doc = config.OWNED_RECORDS.get(path, ("idor_probe", "records"))
+    asked, param = mm["requested"], mm["param"]
+    owner = _name(asked)
+    target = f"{owner} ({asked})" if owner else f"USN {asked}"
+    inc = ledger.incident(kind, actor_key, f"IDOR blocked: {who} tried to open the {doc} of {target}", path, actor)
+    risk, sev = detector.score(["foreign_over_limit", "ownership_mismatch"])
+    actions.block_actor(ip, device, f"Tried to open the {doc} of {target}", inc)
+    ledger.update_incident(inc, risk=risk, severity=sev, protected=1, actor=actor,
+                           action=f"Refused before any data was read; IP + device blocked "
+                                  f"{config.BLOCK_SECONDS // 60} min",
+                           reasons=[(f"{who} put challan/receipt {mm['ref']} (owned by {target}) in ?{param}= on {path}"
+                                     if mm.get("ref") else
+                                     f"{who} changed ?{param}= in the link on {path} from {mm['own']} to {asked}"),
+                                    "Zero tolerance: a student may only open their own records, so the first "
+                                    "attempt is blocked and nothing leaves the server"],
+                           evidence=[{"param": param, "asked_for": asked, "own": mm["own"]}])
+    ledger.bump("blocked")
+    ledger.bump("protected")
+    ledger.event("block", f"IDOR blocked: {who} asked for the {doc} of {target} via ?{param}=: refused, "
+                          f"device blocked", inc["id"], dedupe=False)
+    notify.it_head("idor", f"IDOR blocked: {mm['own']} tried to open {asked}'s {doc}",
+                   f"{who} changed ?{param}= in the link from IP {ip}. Nothing was shown; device blocked.")
+    if owner:
+        notify.student(asked, "idor_attempt", f"Someone tried to open your {doc}",
+                       f"At {time.strftime('%H:%M')} another logged-in student changed a link to open your {doc}. "
+                       f"Kavach blocked it before anything was shown, and blocked their device. "
+                       f"Nothing of yours was exposed.")
+    return actions.blocked_response(request, f"Kavach blocked this: you can only open your own {doc}. This attempt "
+                                    f"was recorded and this device is blocked for {config.BLOCK_SECONDS // 60} "
+                                    f"minutes.", inc["id"], code="ownership")
+
+
 def _rebuild(resp: Response, body: bytes) -> Response:
     new = Response(content=body, status_code=resp.status_code, media_type=resp.media_type or "application/json")
     for k, v in resp.raw_headers:

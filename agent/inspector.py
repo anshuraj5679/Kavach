@@ -78,14 +78,37 @@ def find_sqli(values: list[tuple[str, str]]) -> dict | None:
 
 # ---------------------------------------------------------------- ownership
 def ownership_mismatch(path: str, request: Request, session) -> dict | None:
-    """Logged-in user asks for a record owner (roll / userId) that is not theirs."""
-    param = config.OWNER_PARAMS.get(path)
-    if not param or not session:
+    """Logged-in user asks for a record owner (roll / userId / challan ...) that is not theirs."""
+    if not session:
         return None
-    requested = request.query_params.get(param)
-    if requested and requested.strip() != session.roll:
-        return {"param": param, "requested": requested.strip(), "own": session.roll}
+    own = session.roll
+    if not config.OWNERSHIP_ZERO_TOLERANCE:              # older rule: only the known record endpoints
+        param = config.OWNER_PARAMS.get(path)
+        requested = request.query_params.get(param) if param else None
+        if requested and requested.strip() != own:
+            return {"param": param, "requested": requested.strip(), "own": own}
+        return None
+    # Zero tolerance: every page and API, every value of every parameter (so ?roll=101&roll=102
+    # or ?ROLL=102 cannot slip through).
+    for name, value in request.query_params.multi_items():
+        key, v = name.lower(), value.strip()
+        if not v:
+            continue
+        if key in config.IDENTITY_PARAMS and v.lower() != own.lower():
+            return {"param": name, "requested": v, "own": own}
+        if key in config.RECORD_REFS:
+            owner = _record_owner(config.RECORD_REFS[key], v)
+            if owner and owner != own:
+                return {"param": name, "requested": owner, "own": own, "ref": v}
     return None
+
+
+def _record_owner(sql: str, value: str) -> str | None:
+    from contextlib import closing
+    from app import db                                   # local import: the agent only reads ownership
+    with closing(db.connect()) as conn:
+        row = conn.execute(sql, (value,)).fetchone()
+    return row[0] if row else None
 
 
 # ---------------------------------------------------------------- session guard (features 2 + 3)

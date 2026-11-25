@@ -229,7 +229,8 @@
 
   // ------------------------------------------------------------------ alerts + blocks
   const KIND_PILL = { lockout_shield: ["sev-high", "lockout shield"], new_device: ["sev-medium", "new device"], hijack: ["sev-critical", "hijack"],
-    frozen: ["sev-critical", "frozen"], block: ["sev-high", "block"], not_me: ["sev-high", "not me"] };
+    frozen: ["sev-critical", "frozen"], block: ["sev-high", "block"], not_me: ["sev-high", "not me"],
+    extension: ["sev-high", "extension"], download_link: ["sev-high", "download link"], idor: ["sev-critical", "IDOR"] };
   function renderNotifs(list) {
     const sig = list.map((n) => n.id).join(",");
     if (sig === notifSig) return;

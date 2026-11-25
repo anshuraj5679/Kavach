@@ -88,15 +88,15 @@ python attacks/simulate.py all
 
 Watch the dashboard fill in live:
 
-* **Scraping**: 3 records got out, then Rahul's device was blocked and his account frozen (OTP re-verification).
+* **Scraping**: the first changed `?roll=` is refused. **No marks get out**, Rahul's device is blocked, and the student whose record was targeted is told.
 * **Over-exposure**: phone, Aadhaar and address **masked in flight**; the 420-row dump **stopped**.
 * **SQL injection**: blocked **before the database was touched**.
-* **Receipt IDOR**: refused on the first try.
+* **Receipt IDOR**: refused on the first try, and the device is blocked.
 * **Lockout attack**: the attacker is blocked after 5 tries, before the portal's own 10-try lock. **The real Priya still logs in.** A classmate on the same Wi-Fi IP, on her own device, logs in fine too.
 * **Password guessing**: blocked after 5 guesses.
 * **Session hijack**: a cookie replayed from another device is rejected.
 
-**2:15 · Explain.** Click the critical *Results scraping* incident. The AI report covers what happened, why it was flagged, the exact impact, the action taken, and **the root-cause code fix** pointing at `WEAK SPOT #1` in `app/portal.py`. Switch to the *Student notice* tab: a draft email for the 3 affected students. Scroll to the **leak ledger**: whose record, which fields, to whom, from which IP, and when.
+**2:15 · Explain.** Click the *IDOR blocked* incident. The AI report covers what happened, why it was flagged, the exact impact, the action taken, and **the root-cause code fix** pointing at `WEAK SPOT #1` in `app/portal.py`. Scroll to the **leak ledger**: whose record, which fields, to whom, from which IP, and when.
 
 **2:45 · Close.** "Rules decide, the AI explains. Kavach doesn't replace fixing the portal: it buys the college time, tells them exactly what to fix, and tells students the truth."
 
@@ -129,7 +129,8 @@ Every allow, mask or block decision comes from the deterministic thresholds in `
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `FOREIGN_RECORD_LIMIT` | 3 | other people's records an actor may see in the window before being blocked |
+| `OWNERSHIP_ZERO_TOLERANCE` | True | on **every page and API**: a link carrying another student's ID (`roll`, `usn`, `userId`, `student`, … in any case, even repeated) or another student's challan / receipt number is refused on the first try, the IP + device is blocked and the record's owner is told. Set False for the older rule below |
+| `FOREIGN_RECORD_LIMIT` | 3 | (only when zero tolerance is off) other people's records an actor may see in the window before being blocked |
 | `ROW_SPIKE_LIMIT` | 100 | other people's rows in one response that count as a mass dump (response stopped) |
 | `FAILED_LOGIN_LIMIT` | 5 | wrong tries per IP + device (the portal's own lock is at 10) |
 | `SHARED_IP_LOGIN_LIMIT` | 3 | tries for other devices on an IP that already has a blocked device |
@@ -144,6 +145,40 @@ The anomaly model can raise an incident's risk score but never overrides a hard 
 2. **Session-hijack guard.** Each session is bound to the device it was created on. The same cookie arriving from another device ends the session. A 10-minute idle timeout covers an abandoned lab PC (same device, same IP), and *Log out from all devices* is on the Account page.
 3. **Forgotten login on someone else's phone.** A device the student has never confirmed is **untrusted**: the student is notified on first login, and the session ends after 3 idle minutes, after 15 minutes in total, or when the network (IP) changes. Each new-device alert has *"This wasn't me: log out everywhere"* and *"Trust this device"* actions.
 
+### Protected downloads (receipt and acknowledgement)
+
+Two buttons download a PDF straight away: *Generate receipt* on **Fees** and *Download acknowledgement* on **Acknowledgement**. The Acknowledgement page sits between Admissions and Fees, and shows the student's odd-semester course registration (9 courses, 21 credits) with the declaration and signature lines. Both buttons carry `data-kavach-download` and are protected the same way.
+
+* **Agent OFF:** each button is a plain link (`/api/fees/receipt/download?userId=…&challan=…`, `/api/acknowledgement/download?userId=…&sem=5`). Dragging it into another tab, or pasting it there, downloads the file in that tab too. These are weak spots #4b and #6.
+* **Agent ON:** the real URL is never in the page. Each button points to a random dead end (`/kavach/scrambled/<id>`), and the guard script keeps the real URL in memory.
+  * **Click:** the page gets a one-time ticket from `/kavach/ticket`, bound to the session, the download, the student and the document, and valid for 30 seconds. It then downloads with the ticket in an `X-Kavach-Ticket` header. The download starts at once.
+  * **Drag a button out:** the drag carries only the dead-end URL. The dashboard shows a *"… link moved out of the … page"* incident, a feed line, and an IT-head alert when the link is dropped outside the window. The link is re-scrambled after every drag.
+  * **Open the dragged link anywhere:** a Kavach page explains that the link was scrambled, nothing downloads, and the dashboard logs who opened it and from which IP.
+  * **Paste or type the real URL in another tab:** refused, because a new tab cannot send the ticket header (*"… download refused … no valid tab ticket"*). A ticket for one document never opens another.
+  * **Change `?userId=`** to another student: refused before the PDF is built (zero tolerance, like receipts).
+
+### Extension guard
+
+Every logged-in page loads `static/kavach-guard.js`, which reports extension footprints to `/kavach/extension`. The server keeps a **baseline** for each session:
+
+* **Extensions already active at login are allowed.** The first logged-in page sets the baseline, and the dashboard notes them: *"Rahul Sharma (101) logged in with browser extension(s) already active: Leo Wallet, Shield Wallet. Allowed for this session."*
+* **An extension connected after login logs the student out.** This covers an extension switched on, clicked into the page, or showing up on a later page. The student lands on the login page with an explanation, and the dashboard shows a *"Browser extension connected in the session of …"* incident, a feed line and an IT-head alert naming the extension where it can.
+* A new generic page change (an extra element, a hooked function) while extensions were already active is logged as a warning, not a logout, because one of those extensions most likely caused it. A new extension id, custom element, marker attribute or foreign script always logs the student out.
+* The baseline is taken on the first page after login **even while the agent is OFF**, and switching the agent ON never resets it. The guard checks in every 4 seconds and holds whatever it saw while the agent was OFF, so an extension opened during that time is caught as soon as the agent is switched ON, with no refresh and no new login.
+* **Right-click extensions** read the selected text inside the browser and never touch the page, so no page can see them. While the agent is ON, the right-click menu (mouse, Shift+F10 and the menu key) is switched off on logged-in pages. The student sees a short notice, and the dashboard feed logs *"Right-click menu blocked for …"*.
+* **Right-click unblockers** (Allow Right-Click and similar) swap the browser's `preventDefault` so that pages cannot cancel right-click, copy or selection. Kavach keeps its own copy of the original, so the right-click block keeps working. It also checks those built-ins (`MouseEvent`/`ClipboardEvent.preventDefault`, `Event.preventDefault`, `Selection.removeAllRanges`, `addEventListener`, `alert`) on every page change and every right-click. Any swap is tampering and logs the student out, **even if the unblocker was on before login**, because it disarms Kavach itself. A right-click menu that opens without ever reaching Kavach counts too.
+* Browser features such as Chrome's *Save password?* bubble are not part of the page and are never seen.
+
+A footprint is any of these:
+
+* a file loaded from a `chrome-extension://` style URL
+* a custom element such as `<grammarly-extension>` (the portal defines none)
+* an element, style or iframe added outside `<main>`
+* a marker attribute on `<html>` or `<body>`
+* `fetch` or `XMLHttpRequest` replaced to intercept data
+
+Limits: a web page cannot list installed extensions. Extensions that never touch the page are invisible, but they also cannot read it. The check runs in the browser, so a determined attacker can disable it: it protects students from extensions, it is not a defence against attackers. It is enforced only while the agent is ON. Set `EXTENSION_GUARD = False` in `agent/config.py` to turn it off. Helpful extensions such as password managers and Grammarly trigger it too.
+
 > A website cannot read a MAC address. Kavach uses the device-ID cookie plus the IP.
 
 > `client_ip()` reads `X-Forwarded-For` so the simulator can play several attackers from one machine. In production, trust that header **only** from your own reverse proxy.
@@ -156,10 +191,12 @@ Each is marked `# WEAK SPOT` in the code, with a `# SAFE VERSION:` comment showi
 
 | # | Where | Flaw | What Kavach does |
 |---|---|---|---|
-| 1 | `app/portal.py` → `api_results` | IDOR: `?roll=` is never checked against the session | counts foreign records, blocks + freezes after 3 |
+| 1 | `app/portal.py` → `api_results` | IDOR: `?roll=` is never checked against the session | zero tolerance: first foreign `?roll=` refused, IP + device blocked, owner notified |
 | 2 | `app/portal.py` → `api_library_borrowers` | `SELECT *` sends phone/Aadhaar/address the page never shows; no `?limit=` cap | masks PII in flight; stops dumps over 100 rows |
 | 3 | `app/portal.py` → `api_admissions_search` | SQL built by string concatenation; raw DB errors echoed | blocks the pattern before the DB |
-| 4 | `app/portal.py` → `api_fee_receipt` | IDOR on `?userId=`, plus `SELECT *` leaks Aadhaar and password | refuses foreign receipts, blocks after 2 |
+| 4 | `app/portal.py` → `api_fee_receipt` | IDOR on `?userId=`, plus `SELECT *` leaks Aadhaar and password | zero tolerance: first foreign `?userId=` refused, IP + device blocked, owner notified |
+| 4b | `app/portal.py` → `api_fee_receipt_download` | The *Generate receipt* PDF is a plain GET link that works in any tab or site it is dragged or pasted into | scrambles the link on the page, downloads only with a one-time tab ticket, logs drags and refused opens |
+| 6 | `app/portal.py` → `api_acknowledgement_download` | Course acknowledgement PDF: student taken from `?userId=` (IDOR) and a plain GET link that works in any tab | refuses foreign acknowledgements, scrambles the link, downloads only with a one-time tab ticket |
 | 5 | `app/auth.py`, `app/portal.py` | DOB passwords, ID-card number as "second factor", per-USN lockout, sessions never expire and aren't bound to a device | lockout shield, session guard, untrusted devices |
 
 ---

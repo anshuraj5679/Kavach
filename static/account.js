@@ -8,6 +8,7 @@
   const KIND = {
     new_device: ["New device", "pill-warn"], lockout_shield: ["Attack blocked", "pill-danger"],
     hijack: ["Session hijack", "pill-danger"], frozen: ["Account paused", "pill-danger"],
+    idor_attempt: ["Record protected", "pill-danger"], extension: ["Signed out", "pill-warn"],
   };
 
   async function load() {
@@ -15,14 +16,20 @@
     const r = await api("/api/me/alerts");
     if (!r.ok) { $("alerts").innerHTML = alertBox("error", esc(r.data.error || "Could not load alerts.")); return; }
     const d = r.data;
-    if (!d.agent_on) $("acct-msg").innerHTML = alertBox("warn", "<strong>Kavach protection is switched off.</strong> Sign-in alerts and device checks are paused.");
-    else $("acct-msg").innerHTML = "";
+    // The agent-off notice shares #acct-msg with action results: only clear what load() put there.
+    const m = $("acct-msg");
+    if (!d.agent_on) { m.innerHTML = alertBox("warn", "<strong>Kavach protection is switched off.</strong> Sign-in alerts and device checks are paused."); m.dataset.agent = "1"; }
+    else if (m.dataset.agent) { m.innerHTML = ""; delete m.dataset.agent; }
 
     $("alerts").innerHTML = d.alerts.length ? d.alerts.map((a) => {
       const [label, cls] = KIND[a.kind] || ["Notice", "pill-info"];
-      const acts = a.action ? `<div class="alert-actions">
-          ${a.action.type === "new_device" && a.action.device ? `<button class="btn btn-sm" data-do="trust">Yes, it was me: trust this device</button>` : ""}
-          <button class="btn btn-ghost btn-sm" data-do="notme">This wasn't me: log out everywhere</button></div>` : "";
+      const act = a.action, isNew = act && act.type === "new_device" && act.device;
+      const which = isNew && act.this_device ? "this device" : "that device";
+      const acts = !act ? "" : isNew && act.trusted
+        ? `<div class="alert-actions"><span class="pill pill-ok">You confirmed it: ${which} is trusted</span></div>`
+        : `<div class="alert-actions">
+          ${isNew ? `<button class="btn btn-sm" data-do="trust" data-device="${esc(act.device)}">Yes, it was me: trust ${which}</button>` : ""}
+          <button class="btn btn-ghost btn-sm" data-do="notme">This wasn't me: log out everywhere</button></div>`;
       return `<div class="alert-item ${a.read ? "" : "unread"}">
         <span class="pill ${cls}" style="align-self:start">${label}</span>
         <div><h3 style="margin:0">${esc(a.title)}</h3><p>${esc(a.body)}</p>
@@ -47,13 +54,24 @@
     const b = e.target.closest("[data-do]");
     if (!b) return;
     b.disabled = true;
+    const label = b.textContent;
+    b.textContent = "Working…";
+    const m = $("acct-msg");
+    delete m.dataset.agent;
     if (b.dataset.do === "trust") {
-      await api("/api/me/trust-device", { method: "POST" });
-      $("acct-msg").innerHTML = alertBox("ok", "This device is now trusted. Normal session length applies.");
+      const r = await api("/api/me/trust-device", { json: b.dataset.device ? { device: b.dataset.device } : {} });
+      m.innerHTML = r.ok
+        ? alertBox("ok", r.data.this_device ? "<strong>Done.</strong> This device is now trusted, so normal session length applies."
+                                            : "<strong>Done.</strong> That device is now trusted, so normal session length applies on it.")
+        : alertBox("error", esc(r.data.error || "Could not trust the device. Please try again."));
     } else if (b.dataset.do === "notme") {
       const r = await api("/api/me/not-me", { method: "POST" });
-      $("acct-msg").innerHTML = alertBox("ok", `Done. Ended ${r.data.ended ?? 0} other session(s) and told the IT team. Consider changing your password.`);
+      m.innerHTML = r.ok
+        ? alertBox("ok", `<strong>Done.</strong> Ended ${r.data.ended ?? 0} other session(s) and told the IT team. Consider changing your password.`)
+        : alertBox("error", esc(r.data.error || "Could not log out the other sessions. Please try again."));
     }
+    if (!m.innerHTML) { b.disabled = false; b.textContent = label; }
+    m.scrollIntoView({ behavior: "smooth", block: "nearest" });
     load();
   });
 
