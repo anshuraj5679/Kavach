@@ -1,0 +1,21 @@
+    <div class="page-head">
+      <div><span class="eyebrow">Protected by Kavach</span><h1>Account security</h1><p>Sign-in alerts, your devices and active sessions.</p></div>
+      <button class="btn btn-danger btn-sm" type="button" id="logout-all">Log out from all devices</button>
+    </div>
+    <div id="acct-msg" aria-live="polite"></div>
+    <div class="grid grid-2" style="align-items:start">
+      <section class="card rise" aria-labelledby="alerts-title">
+        <div class="section-title"><span class="icon-dot gold" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10 21h4"/></svg></span><h2 id="alerts-title" style="margin:0">Security alerts</h2></div>
+        <div id="alerts"></div>
+      </section>
+      <div class="grid">
+        <section class="card rise rise-2" aria-labelledby="dev-title">
+          <div class="section-title"><span class="icon-dot" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M11 18h2"/></svg></span><h2 id="dev-title" style="margin:0">This device</h2></div>
+          <div id="thisdev"></div>
+        </section>
+        <section class="card rise rise-3" aria-labelledby="sess-title">
+          <div class="section-title"><span class="icon-dot" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span><h2 id="sess-title" style="margin:0">Active sessions</h2></div>
+          <div id="sessions"></div>
+        </section>
+      </div>
+    </div>

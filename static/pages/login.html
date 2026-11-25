@@ -1,0 +1,61 @@
+    <div class="auth-wrap">
+      <section class="card auth-card rise" aria-labelledby="login-title">
+        <span class="eyebrow">Students</span>
+        <h1 id="login-title" style="font-size:28px">Sign in to the portal</h1>
+        <ol class="stepper" aria-label="Sign-in steps">
+          <li id="st1" class="active"><span class="num">1</span>Your details</li>
+          <li id="st2"><span class="num">2</span>ID card</li>
+        </ol>
+        <div id="msg" aria-live="polite"></div>
+
+        <form id="step1" novalidate>
+          <div class="field">
+            <label for="roll">USN / roll number</label>
+            <input id="roll" name="roll" type="text" inputmode="numeric" autocomplete="username" required placeholder="e.g. 101">
+          </div>
+          <div class="field">
+            <label for="dob">Password</label>
+            <div class="input-wrap">
+              <input id="dob" name="dob" type="password" inputmode="numeric" autocomplete="current-password" required placeholder="DDMMYYYY" aria-describedby="dob-hint">
+              <button type="button" class="reveal" aria-controls="dob" aria-pressed="false">Show</button>
+            </div>
+            <span class="hint" id="dob-hint">Your default password is your date of birth, e.g. 05032004.</span>
+          </div>
+          <button class="btn btn-block" type="submit">Continue</button>
+        </form>
+
+        <form id="step2" novalidate hidden>
+          <p class="muted" id="hello" style="margin-bottom:16px"></p>
+          <div class="field">
+            <label for="idcard">ID card number</label>
+            <input id="idcard" name="id_card" type="text" autocomplete="off" required placeholder="NITM000000" aria-describedby="id-hint" style="text-transform:uppercase">
+            <span class="hint" id="id-hint">Printed on the front of your college ID card.</span>
+          </div>
+          <button class="btn btn-block" type="submit">Sign in</button>
+          <button class="btn btn-ghost btn-block" type="button" id="back" style="margin-top:8px">Back</button>
+        </form>
+
+        <form id="otp" novalidate hidden>
+          <div class="field">
+            <label for="otpcode">One-time code</label>
+            <input id="otpcode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6 digits" aria-describedby="otp-hint">
+            <span class="hint" id="otp-hint">Kavach paused this account. Enter the code sent to your registered phone (demo: shown in your portal alerts and on the IT dashboard feed).</span>
+          </div>
+          <button class="btn btn-block" type="submit">Verify and continue</button>
+        </form>
+      </section>
+
+      <aside class="card rise rise-2" aria-labelledby="demo-title">
+        <div class="section-title"><span class="icon-dot gold" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5Z"/></svg></span>
+          <h2 id="demo-title" style="margin:0">Demo accounts</h2></div>
+        <p class="muted" style="font-size:14px">Fictional students for the demo. Run <span class="mono">python run.py --accounts</span> for the full list.</p>
+        <div class="table-wrap"><table>
+          <thead><tr><th scope="col">USN</th><th scope="col">Password</th><th scope="col">ID card</th></tr></thead>
+          <tbody>
+            <tr><td>101 <span class="caption">Rahul</span></td><td class="mono">05032004</td><td class="mono">NITM240101</td></tr>
+            <tr><td>102 <span class="caption">Priya</span></td><td class="mono">14082004</td><td class="mono">NITM240102</td></tr>
+            <tr><td>105 <span class="caption">Sneha</span></td><td class="mono">19012005</td><td class="mono">NITM240105</td></tr>
+          </tbody></table></div>
+        <p class="caption" style="margin:12px 0 0">After 10 wrong ID-card numbers the portal locks the USN for 5 minutes.</p>
+      </aside>
+    </div>

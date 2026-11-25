@@ -1,0 +1,13 @@
+    <div class="page-head">
+      <div><span class="eyebrow">Central library</span><h1>Library</h1><p>Your loans, and what's currently out across campus.</p></div>
+    </div>
+    <div class="grid" style="grid-template-columns:minmax(0,1fr) minmax(0,2fr);align-items:start" id="libgrid">
+      <section class="card rise" aria-labelledby="mine-title">
+        <div class="section-title"><span class="icon-dot" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2Zm0 0v16"/></svg></span><h2 id="mine-title" style="margin:0">My books</h2></div>
+        <div id="mine"></div>
+      </section>
+      <section class="rise rise-2" aria-labelledby="board-title">
+        <div class="section-title"><span class="icon-dot gold" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h12"/></svg></span><h2 id="board-title" style="margin:0">Borrower board</h2><span class="caption" style="margin-left:auto">Next 20 due</span></div>
+        <div id="board" aria-live="polite"></div>
+      </section>
+    </div>

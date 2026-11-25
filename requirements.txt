@@ -1,0 +1,7 @@
+fastapi>=0.110
+uvicorn>=0.29
+httpx>=0.27          # attack simulator + FastAPI TestClient
+Faker>=24.0          # fake student data
+scikit-learn>=1.3    # optional: IsolationForest anomaly score (Kavach runs without it)
+anthropic>=0.70      # optional: AI reports with Claude (template reports without a key)
+# openai>=1.0        # optional alternative: set OPENAI_API_KEY instead of ANTHROPIC_API_KEY

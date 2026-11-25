@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blocked by Kavach</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <style>
+    :root { --bg: #0D1412; --panel: #141E1B; --border: #22302B; --text: #DFE9E4; --muted: #8AA198;
+            --danger: #E24B4A; --danger-bg: #3A1414; --safe: #6FCF97; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px;
+           font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--text);
+           background: radial-gradient(circle at 50% 0%, #1a2a24 0%, var(--bg) 60%); }
+    .card { width: 100%; max-width: 560px; background: var(--panel); border: 1px solid var(--border); border-radius: 16px;
+            padding: 40px 32px 32px; text-align: center; box-shadow: 0 30px 60px -30px rgba(0,0,0,.7); animation: rise .45s ease both; }
+    .shield { width: 84px; height: 84px; margin: 0 auto 24px; border-radius: 50%; background: var(--danger-bg);
+              display: grid; place-items: center; box-shadow: 0 0 0 10px rgba(226,75,74,.08); animation: pulse 2.4s ease-in-out infinite; }
+    .tag { font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--safe); font-weight: 600; }
+    h1 { font-size: 30px; font-weight: 600; margin: 8px 0 12px; }
+    p { color: var(--muted); line-height: 1.6; margin: 0 0 24px; }
+    .reason { background: #0F1815; border: 1px solid var(--border); border-left: 3px solid var(--danger); border-radius: 10px;
+              padding: 14px 16px; text-align: left; color: var(--text); margin-bottom: 24px; }
+    .reason small { display: block; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 4px; }
+    dl { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 0 0 24px; }
+    dl div { background: #0F1815; border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
+    dt { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+    dd { margin: 4px 0 0; font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+    a { color: var(--safe); }
+    .foot { font-size: 13px; color: var(--muted); }
+    @keyframes rise { from { opacity: 0; transform: translateY(10px); } }
+    @keyframes pulse { 50% { box-shadow: 0 0 0 18px rgba(226,75,74,0); } }
+    @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+    @media (max-width: 520px) { dl { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main class="card" role="main" aria-labelledby="t">
+    <div class="shield" aria-hidden="true">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#E24B4A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5Z"/><path d="m9.5 9.5 5 5M14.5 9.5l-5 5"/></svg>
+    </div>
+    <div class="tag">Kavach · portal shield</div>
+    <h1 id="t">Blocked by Kavach</h1>
+    <p>This request was stopped before it could read or expose student data.</p>
+    <div class="reason"><small>Reason</small>{{reason}}</div>
+    <dl>
+      <div><dt>Incident</dt><dd>{{incident}}</dd></div>
+      <div><dt>Your IP</dt><dd>{{ip}}</dd></div>
+      <div><dt>Time</dt><dd>{{time}}</dd></div>
+    </dl>
+    <p class="foot">Student who thinks this is a mistake? Contact the IT help desk (ext. 2040) with the incident number.<br><a href="/">Back to the portal home</a></p>
+  </main>
+</body>
+</html>
