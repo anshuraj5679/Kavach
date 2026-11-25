@@ -10,16 +10,26 @@ own fake attacker IP (X-Forwarded-For) so blocking one does not hide the next.
     python attacks/simulate.py scrape           # one attack: scrape | overexposure | sqli | receipt |
                                                 #              lockout | bruteforce | hijack
 
+    Availability scenarios (not part of "all"):
+    python attacks/simulate.py flood --compare  # a bot flood while a real student uses Results
+    python attacks/simulate.py rush --compare   # results day: 300 real students at once while one pays fees
+
 The simulator refuses to target anything except 127.0.0.1 / localhost.
 """
 from __future__ import annotations
 
 import argparse
+import asyncio
 import ipaddress
 import os
+import random
 import socket
+import sqlite3
+import statistics
 import sys
 import time
+from contextlib import closing
+from pathlib import Path
 from datetime import date, timedelta
 from urllib.parse import urlparse
 
@@ -332,6 +342,253 @@ ATTACKS = {
 }
 
 
+# ================================================================== availability scenarios (not in "all")
+# Bounded, localhost-only load tests for the availability shield (agent/availability.py).
+FLOOD_BOTS, FLOOD_CONNECTIONS, FLOOD_SECONDS, FLOOD_MAX = 4, 16, 30, 60000
+# Demo server for each scenario: the flood uses a small, busy college server (2 workers, 250 ms database),
+# the rush a mid-size one (the defaults: 8 workers, 100 ms).
+SERVER_PROFILE = {"flood": {"workers": 2, "db_ms": 250}, "rush": {}}
+RUSH_STUDENTS, RUSH_SECONDS = int(os.environ.get("RUSH_STUDENTS", 300)), 18
+FEE_STUDENT_IP, RESULTS_STUDENT_IP = "10.88.0.5", "10.88.0.6"
+
+
+def _students(n: int) -> list[tuple[str, str, str]]:
+    """(roll, password, id_card) of n fictional students from the local portal database."""
+    path = Path(__file__).resolve().parent.parent / "data" / "portal.db"
+    if not path.exists():
+        sys.exit("data/portal.db not found: start the portal once first (python run.py)")
+    with closing(sqlite3.connect(path)) as conn:
+        return conn.execute("SELECT roll, password, id_card FROM students WHERE CAST(roll AS INTEGER) > 105 "
+                            "ORDER BY CAST(roll AS INTEGER) LIMIT ?", (n,)).fetchall()
+
+
+def _aclient(base: str, ip: str, label: str) -> "httpx.AsyncClient":
+    return httpx.AsyncClient(base_url=base, timeout=10, follow_redirects=False, headers={
+        "X-Forwarded-For": ip, "User-Agent": f"kavach-simulator/{label}", "Accept": "application/json"})
+
+
+async def _alogin(cl, roll: str, password: str, id_card: str) -> bool:
+    try:
+        r = await cl.post("/api/auth/step1", json={"roll": roll, "dob": password})
+        if r.status_code != 200:
+            return False
+        return (await cl.post("/api/auth/step2", json={"id_card": id_card})).status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
+def _fmt_ms(v) -> str:
+    if v is None:
+        return "-"
+    return f"{v / 1000:.1f} s" if v >= 1000 else f"{v:.0f} ms"
+
+
+def _median(values: list[float]):
+    return statistics.median(values) if values else None
+
+
+async def _pay_fees(base: str, stop: asyncio.Event, samples: list) -> None:
+    """A real student (Sneha, 105) opening Fees and downloading a receipt, every second."""
+    a = ACCOUNTS["105"]
+    async with _aclient(base, FEE_STUDENT_IP, "fee-student") as cl:
+        await _alogin(cl, "105", a["dob"], a["id_card"])
+        while not stop.is_set():
+            t0, ok = time.perf_counter(), False
+            try:
+                r = await cl.get("/api/fees")
+                if r.status_code == 200 and r.json().get("rows"):
+                    ch = r.json()["rows"][0]["challan_no"]
+                    t = jget(await cl.post("/kavach/ticket", json={"kind": "receipt", "userId": "105", "ref": ch})).get("ticket")
+                    r2 = await cl.get(f"/api/fees/receipt/download?userId=105&challan={ch}",
+                                      headers={"X-Kavach-Ticket": t} if t else {})
+                    ok = r2.status_code == 200 and r2.content[:5] == b"%PDF-"
+            except httpx.HTTPError:
+                ok = False
+            samples.append(((time.perf_counter() - t0) * 1000, ok))
+            await asyncio.sleep(1.0)
+
+
+def _flood(base: str) -> dict:
+    """Bots run in threads: one Python process juggling many asyncio connections stalls on
+    Windows long before the server does, so threads give a realistic flood."""
+    import threading
+    st = {"sent": 0, "refused": 0, "served": 0, "timeouts": 0}
+    lock = threading.Lock()
+    a = ACCOUNTS["105"]
+
+    def watch(stop: threading.Event, samples: list) -> None:
+        """Opens the whole Results page like a browser: the page, then its data."""
+        cl = Client(base, RESULTS_STUDENT_IP, "real-student")
+        cl.http.timeout = httpx.Timeout(40)
+        try:
+            cl.login("105")
+            while not stop.is_set():
+                t0 = time.perf_counter()
+                try:
+                    ok = (cl.get("/results", headers={"Accept": "text/html"}).status_code == 200
+                          and cl.get("/api/results").status_code == 200)
+                except httpx.HTTPError:
+                    ok = False
+                samples.append(((time.perf_counter() - t0) * 1000, ok))
+                stop.wait(0.5)
+        finally:
+            cl.close()
+
+    def bot(ip: str, stop: threading.Event) -> None:
+        cl = Client(base, ip, "flood-bot")
+        cl.http.timeout = httpx.Timeout(10)
+        paths, i = ["/api/stats", "/api/admissions/search?q=an", "/"], 0      # database-heavy pages
+        try:
+            while not stop.is_set() and st["sent"] < FLOOD_MAX:
+                cl.http.cookies.clear()                 # a bot that drops cookies
+                try:
+                    r = cl.get(paths[i % 3])
+                except httpx.HTTPError:
+                    with lock:
+                        st["timeouts"] += 1
+                    continue
+                i += 1
+                with lock:
+                    st["sent"] += 1
+                    st["refused" if r.status_code in (403, 429) else "served"] += 1
+        finally:
+            cl.close()
+
+    before, during = [], []
+    stop = threading.Event()
+    w = threading.Thread(target=watch, args=(stop, before), daemon=True)
+    w.start()
+    time.sleep(3)                                       # the student's normal experience
+    stop.set()
+    w.join()
+
+    stop = threading.Event()
+    ips = [f"10.99.0.{i + 10}" for i in range(FLOOD_BOTS)]
+    threads = [threading.Thread(target=bot, args=(ip, stop), daemon=True) for ip in ips for _ in range(FLOOD_CONNECTIONS)]
+    threads.append(threading.Thread(target=watch, args=(stop, during), daemon=True))
+    t0 = time.time()
+    for t in threads:
+        t.start()
+    while time.time() - t0 < FLOOD_SECONDS and st["sent"] < FLOOD_MAX:
+        time.sleep(0.25)
+    stop.set()
+    for t in threads:
+        t.join(timeout=15)
+    return {"st": st, "before": before, "during": during, "secs": time.time() - t0, "bots": len(ips)}
+
+
+def attack_flood(base: str) -> dict:
+    header("flood", f"{FLOOD_BOTS} bot machines flood the portal for {FLOOD_SECONDS} s while a real student keeps opening Results")
+    r = _flood(base)
+    st, during = r["st"], r["during"]
+    ok = [ms for ms, g in during if g]
+    failed = sum(1 for _, g in during if not g)
+    info(f"real student before the flood: the Results page opens in {_fmt_ms(_median([m for m, g in r['before'] if g]))}")
+    info(f"{st['sent']} bot requests in {r['secs']:.0f} s ({st['sent'] / r['secs']:.0f}/s) from {r['bots']} IPs")
+    (good if st["refused"] else bad)(f"{st['refused']} bot requests refused by Kavach, {st['served']} served")
+    (good if not failed and ok and _median(ok) < 1000 else warn)(
+        f"real student during the flood: the Results page opens in {_fmt_ms(_median(ok))} (median), slowest "
+        f"{_fmt_ms(max(ok) if ok else None)}, {failed} of {len(during)} failed")
+    return {"attack": "flood", "leaked": 0, "blocked": st["refused"] > 0, "student_ms": _median(ok),
+            "student_max": max(ok) if ok else None, "student_failed": failed, "student_tries": len(during),
+            "bot_served": st["served"], "bot_refused": st["refused"]}
+
+
+async def _rush(base: str) -> dict:
+    students = _students(RUSH_STUDENTS)
+    st = {"ok": 0, "queued": 0, "errors": 0, "timeouts": 0, "first_ms": [], "never": 0, "login_failed": 0}
+    go, stop, samples = asyncio.Event(), asyncio.Event(), []
+    logged_in = asyncio.Semaphore(15)
+    ready = []
+
+    async def student(i: int, roll: str, pw: str, card: str) -> None:
+        async with _aclient(base, f"10.77.{i // 200}.{i % 200 + 20}", "results-student") as cl:
+            async with logged_in:
+                ok = await _alogin(cl, roll, pw, card)
+            ready.append(ok)
+            if not ok:
+                st["login_failed"] += 1
+                return
+            await go.wait()                             # results are published: everyone at once
+            t_first, got = time.perf_counter(), False
+            while not stop.is_set():
+                try:
+                    r = await cl.get("/api/results")
+                except httpx.HTTPError:
+                    st["timeouts"] += 1
+                    await asyncio.sleep(0.5)
+                    continue
+                if r.status_code == 200:
+                    if not got:
+                        got = True
+                        st["first_ms"].append((time.perf_counter() - t_first) * 1000)
+                    st["ok"] += 1
+                    await asyncio.sleep(random.uniform(0.3, 0.8))       # impatient refreshing
+                elif r.status_code == 503 and jget(r).get("queued"):
+                    st["queued"] += 1                   # "you're number N in line": wait as told
+                    await asyncio.sleep(jget(r).get("retry_ms", 1000) / 1000)
+                else:
+                    st["errors"] += 1
+                    await asyncio.sleep(0.5)
+            if not got:
+                st["never"] += 1
+
+    crowd = [asyncio.create_task(student(i, *s)) for i, s in enumerate(students)]
+    while len(ready) < len(students):                   # wait until everyone has logged in
+        await asyncio.sleep(0.2)
+    payer = asyncio.create_task(_pay_fees(base, stop, samples))
+    await asyncio.sleep(4)                              # fee payment on a normal day
+    t_go = len(samples)
+    go.set()
+    await asyncio.sleep(RUSH_SECONDS)
+    stop.set()
+    await asyncio.gather(payer, *crowd)
+    return {"st": st, "before": samples[:t_go], "during": samples[t_go:], "n": len(students)}
+
+
+def attack_rush(base: str) -> dict:
+    header("rush", f"results day: {RUSH_STUDENTS} real students open their results at once while Sneha (105) pays her fees")
+    r = asyncio.run(_rush(base))
+    st, during = r["st"], r["during"]
+    ok = [ms for ms, g in during if g]
+    failed = sum(1 for _, g in during if not g)
+    got = r["n"] - st["login_failed"] - st["never"]
+    info(f"{r['n'] - st['login_failed']} of {r['n']} students logged in (fictional accounts)")
+    info(f"fee payment on a normal day: {_fmt_ms(_median([m for m, g in r['before'] if g]))}")
+    (good if got and not st["timeouts"] else warn)(
+        f"{got} students got their results (first result after {_fmt_ms(_median(st['first_ms']))} median); "
+        f"{st['queued']} 'please wait' replies, {st['timeouts']} timeouts, {st['errors']} errors")
+    (good if not failed and ok and _median(ok) < 1000 else bad)(
+        f"fee payment during the rush: {_fmt_ms(_median(ok))} (median), slowest {_fmt_ms(max(ok) if ok else None)}, "
+        f"{failed} of {len(during)} failed")
+    return {"attack": "rush", "leaked": 0, "blocked": False, "student_ms": _median(ok),
+            "student_max": max(ok) if ok else None, "student_failed": failed, "student_tries": len(during),
+            "results_got": got, "results_first": _median(st["first_ms"]), "timeouts": st["timeouts"],
+            "queued": st["queued"]}
+
+
+EXTRA = {"flood": attack_flood, "rush": attack_rush}
+
+
+def print_extra_compare(name: str, off: dict, on: dict) -> None:
+    who = "Results page opens in" if name == "flood" else "student paying fees"
+    rows = [(f"{who}: median", _fmt_ms(off["student_ms"]), _fmt_ms(on["student_ms"])),
+            (f"{who}: slowest", _fmt_ms(off["student_max"]), _fmt_ms(on["student_max"])),
+            (f"{who}: failed", f"{off['student_failed']} of {off['student_tries']}",
+             f"{on['student_failed']} of {on['student_tries']}")]
+    if name == "flood":
+        rows.append(("bot requests served", str(off["bot_served"]), str(on["bot_served"])))
+    else:
+        rows += [("students who got results", str(off["results_got"]), str(on["results_got"])),
+                 ("first result (median)", _fmt_ms(off["results_first"]), _fmt_ms(on["results_first"])),
+                 ("results timeouts", str(off["timeouts"]), str(on["timeouts"]))]
+    print()
+    print(c(f"OFF vs ON  ({name})", BOLD))
+    print(f"   {'':<40}{'agent OFF':>14}{'agent ON':>14}")
+    for label, a, b in rows:
+        print(f"   {label:<40}{a:>14}{b:>14}")
+
+
 # ================================================================== orchestration
 def agent_state(base: str) -> bool | None:
     try:
@@ -387,17 +644,49 @@ def print_compare(off: list[dict], on: list[dict]) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Kavach attack simulator (localhost only)")
-    ap.add_argument("attack", choices=list(ATTACKS) + ["all"])
+    ap.add_argument("attack", choices=list(ATTACKS) + ["all"] + list(EXTRA))
     ap.add_argument("--target", default="http://127.0.0.1:8000", help="portal URL (must be localhost)")
-    ap.add_argument("--compare", action="store_true", help="with 'all': run with the agent OFF, then ON")
+    ap.add_argument("--compare", action="store_true", help="with 'all', 'flood' or 'rush': run with the agent OFF, then ON")
     ap.add_argument("--no-reset", action="store_true", help="with 'all': don't clear the ledger / lockouts first")
     ap.add_argument("--reset", action="store_true", help="clear the ledger / lockouts before a single attack")
+    ap.add_argument("--real-server", action="store_true",
+                    help="flood / rush: do not switch on the demo results-day server (8 workers, slower database)")
     args = ap.parse_args()
 
     base = guard_target(args.target)
     state = agent_state(base)
     if state is None:
         sys.exit(f"Cannot reach the portal at {base}. Start it first:  python run.py")
+
+    if args.attack in EXTRA:
+        runs = (False, True) if args.compare else (state,)
+        out = {}
+        if not args.real_server:                        # behave like a real campus server for the run
+            try:
+                prof = httpx.post(base + "/api/kavach/demo-capacity", json={"enabled": True, **SERVER_PROFILE[args.attack]},
+                                  timeout=5).json()
+                info(f"results-day server ON for this run: {prof.get('workers', '?')} workers, {prof.get('db_ms', '?')} ms "
+                     f"database (--real-server to skip)")
+            except httpx.HTTPError:
+                pass
+        for on in runs:
+            if args.compare:
+                set_agent(base, on)
+                reset(base)
+            banner = "Agent OFF: no protection" if not on else "Agent ON: availability shield active"
+            print("\n" + c("=" * 78, DIM) + "\n" + c(f"  {banner}", BOLD + ";" + (RED if not on else GREEN)) + "\n" + c("=" * 78, DIM))
+            out[on] = EXTRA[args.attack](base)
+            if args.compare and not on:
+                time.sleep(3)                           # let the portal settle between runs
+        if args.compare:
+            print_extra_compare(args.attack, out[False], out[True])
+        if not args.real_server:
+            try:
+                httpx.post(base + "/api/kavach/demo-capacity", json={"enabled": False}, timeout=5)
+            except httpx.HTTPError:
+                pass
+        print(c(f"\n   Dashboard: {base}/admin", DIM))
+        return
 
     if args.attack == "all" and args.compare:
         results = {}

@@ -92,6 +92,7 @@ TYPE_LABELS = {
     "session_hijack": "Session hijack", "extension": "Browser extension in a logged-in session",
     "download_link": "Protected download link moved out of the portal",
     "idor_probe": "URL tampering: another student's ID in the link",
+    "flood": "Traffic flood (availability attack)", "rush": "Results-day rush (heavy real traffic)",
 }
 
 

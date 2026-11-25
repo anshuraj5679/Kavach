@@ -13,12 +13,23 @@
       init.body = JSON.stringify(opts.json);
     }
     let res, data = {};
-    try {
-      res = await fetch(path, init);
-      data = await res.json().catch(() => ({}));
-    } catch (e) {
-      return { ok: false, status: 0, data: { error: "Can't reach the portal. Check that the server is running." } };
+    for (;;) {
+      try {
+        res = await fetch(path, init);
+        data = await res.json().catch(() => ({}));
+      } catch (e) {
+        showQueue(null);
+        return { ok: false, status: 0, data: { error: "Can't reach the portal. Check that the server is running." } };
+      }
+      // Results-day rush (Kavach availability shield): wait our turn, then try again by ourselves.
+      if (res.status === 503 && data.queued) {
+        showQueue(data);
+        await new Promise((r) => setTimeout(r, data.retry_ms || 1000));
+        continue;
+      }
+      break;
     }
+    showQueue(null);
     if (res.status === 401 && data.kavach === "session_ended") {
       location.href = "/student/login?kavach=session_ended";
     }
@@ -40,6 +51,18 @@
         <p>${esc(data.reason || "This request was refused by the portal's security layer.")}</p>
         <div class="meta">incident ${esc(data.incident || "-")} · ${esc(new Date().toLocaleTimeString())}</div>
       </div></div>`;
+  }
+
+  function showQueue(d) {
+    let el = document.getElementById("kavach-queue");
+    if (!d) { if (el) el.remove(); return; }
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "kavach-queue";
+      (document.getElementById("main") || document.body).prepend(el);
+    }
+    el.innerHTML = alertBox("warn", `<strong>Results day is busy.</strong> You're number ${esc(d.position)} in line ` +
+      `(about ${esc(d.wait_seconds)} s). This page opens by itself, so there's no need to refresh. Fee payment is not affected.`);
   }
 
   function alertBox(kind, msg) {

@@ -145,6 +145,35 @@ The anomaly model can raise an incident's risk score but never overrides a hard 
 2. **Session-hijack guard.** Each session is bound to the device it was created on. The same cookie arriving from another device ends the session. A 10-minute idle timeout covers an abandoned lab PC (same device, same IP), and *Log out from all devices* is on the Account page.
 3. **Forgotten login on someone else's phone.** A device the student has never confirmed is **untrusted**: the student is notified on first login, and the session ends after 3 idle minutes, after 15 minutes in total, or when the network (IP) changes. Each new-device alert has *"This wasn't me: log out everywhere"* and *"Trust this device"* actions.
 
+### Availability shield (results day)
+
+The problem statement says portals *"go down at the worst possible moment"* and *"lack someone watching them continuously"*. `agent/availability.py` handles both kinds of heavy traffic, and its own watchdog keeps an eye on the portal.
+
+| Traffic | Example | What Kavach does (agent ON) |
+|---|---|---|
+| **Bad: a flood** | A few bot machines sending far more requests than any person | Refuses a source that goes over a speed limit, **or** keeps more than 8 requests open at once (a person's page has about 4), **or** takes more than 15% of all traffic while the portal is busy. Refused for 60 s with HTTP 429, at the door, before any inspection or database work, and its requests already waiting for the server are dropped |
+| **Good: a rush** | Results are published and hundreds of real students open them at once | **Never blocks anyone.** Switches **rush mode** on by itself: fee payment, receipts and login keep a reserved lane, results queue fairly (one place per student, however often they refresh, with a *"You're number N in line"* banner and automatic retry), library and admissions search are paused. Kavach also pauses its own optional anomaly model. Rush mode switches off when traffic is calm again |
+
+**Portal health panel** (dashboard, under the totals): Up / Slow / Down, response time, requests per second, requests in progress, results queue, fee-lane speed and flood refusals, with a 3-minute chart in which rush mode is shaded. The IT head gets an alert when the portal turns Slow or Down, and each flood and rush gets an incident with a report.
+
+**Demo: results-day server.** On a laptop the demo portal answers in 1 to 2 ms, so a few hundred students hardly strain it. The *Results-day server (demo)* switch in the panel (`app/capacity.py`, off by default) makes it behave like a real campus server: 8 workers and a database that takes about 100 ms per query. It simulates only the server; Kavach's lanes, queue and flood blocking are real. The simulator switches it on for its runs (`--real-server` to skip): the rush uses that mid-size server, and the flood uses a small, busy one (2 workers, 250 ms database), so the difference shows in a browser.
+
+```bash
+python attacks/simulate.py rush --compare    # 300 students open results at once while Sneha pays her fees
+python attacks/simulate.py flood --compare   # 4 bot machines flood the portal for 30 s while Sneha opens Results
+```
+
+Measured on the development laptop (numbers vary from run to run and machine to machine):
+
+| | Agent OFF | Agent ON |
+|---|---|---|
+| Rush: fee payment, median (300 students) | about 7.5 s | about 0.25 s |
+| Rush: first result, median | about 2.3 s | about 3.1 s (fair queue) |
+| Flood: real student opening the whole Results page, median | about 10.5 to 11 s | about 0.1 to 0.3 s |
+| Flood: bot requests that got through (30 s flood) | about 310 | 4 or 5 |
+
+`flood` and `rush` are not part of `all`, so the 7-attack comparison above is unchanged. Limits: this protects the website itself. A very large real-world attack, from millions of machines, is stopped earlier by network services such as a CDN.
+
 ### Protected downloads (receipt and acknowledgement)
 
 Two buttons download a PDF straight away: *Generate receipt* on **Fees** and *Download acknowledgement* on **Acknowledgement**. The Acknowledgement page sits between Admissions and Fees, and shows the student's odd-semester course registration (9 courses, 21 credits) with the declaration and signature lines. Both buttons carry `data-kavach-download` and are protected the same way.

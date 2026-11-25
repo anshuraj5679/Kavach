@@ -16,7 +16,7 @@ from fastapi import Request
 from starlette.responses import Response
 
 from app import auth, db
-from . import actions, config, detector, inspector, ledger, linkguard, notify, scanner
+from . import actions, availability, config, detector, inspector, ledger, linkguard, notify, scanner
 
 DEVICE_RX = re.compile(r"^[A-Za-z0-9_-]{20,40}$")
 DEVICE_MAX_AGE = 400 * 24 * 3600
@@ -275,7 +275,9 @@ async def _guard(request: Request, call_next, ip: str, device: str, path: str):
         ledger.event("protect", f"Removed {res.stripped_passwords} plain-text password field(s) from a response on {path}")
 
     # ---- 7. optional anomaly model: can raise a score, never decides -----------
-    if path.startswith("/api/") and detector.ANOMALY.model is not None:
+    # (Paused only while the availability shield is in rush mode: the model is optional, costs
+    #  about 5 ms per request and can never decide on its own, so it is the first thing to shed.)
+    if path.startswith("/api/") and detector.ANOMALY.model is not None and not availability.shedding():
         a = detector.ANOMALY.score(detector.actor_features(actor_key, roll, res.records))
         if a and a >= 0.3:
             now = time.time()

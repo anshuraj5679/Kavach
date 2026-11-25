@@ -1,6 +1,7 @@
 """FastAPI app: the portal, the Kavach dashboard and the agent middleware in one process."""
 from __future__ import annotations
 
+import asyncio
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -9,9 +10,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from agent import actions, detector, explainer, gateway, ledger, linkguard, notify
+from agent import actions, availability, detector, explainer, gateway, ledger, linkguard, notify
 from agent import config as kconfig
-from . import auth, db, portal
+from . import auth, capacity, db, portal
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
 LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
@@ -21,11 +22,19 @@ LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
 async def lifespan(app: FastAPI):
     db.seed()
     ledger.load()
+    watchdog = asyncio.create_task(availability.watchdog())      # portal health, every second
     yield
+    watchdog.cancel()
 
 
 app = FastAPI(title="Kavach demo", docs_url=None, redoc_url=None, lifespan=lifespan)
+# Registered first = runs innermost. Order per request:
+# flood gate -> gateway -> availability -> capacity -> portal.
+app.middleware("http")(capacity.middleware)             # demo "results-day server" (off by default)
+app.middleware("http")(availability.middleware)         # floods, results-day rush (agent/availability.py)
 app.middleware("http")(gateway.kavach_gateway)          # every request and response passes through Kavach
+app.middleware("http")(availability.flood_gate)         # sources already flooding: refused before inspection
+capacity.drop_check = availability.flooding             # queued requests of a flooding source are dropped
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
@@ -99,8 +108,36 @@ def kavach_reset(request: Request):
     explainer.clear_cache()
     auth.reset_state()
     linkguard.reset()
+    availability.reset()
     ledger.event("info", "Demo reset: ledger, blocks, sessions and portal lockouts cleared", dedupe=False)
     return {"ok": True, "enabled": ledger.enabled()}
+
+
+@app.get("/api/kavach/availability")
+def kavach_availability(request: Request):
+    if (err := _local_only(request)):
+        return err
+    workers, db_ms = capacity.profile()
+    return {**availability.snapshot(), "server_demo": capacity.enabled(),
+            "server_workers": workers, "server_db_ms": db_ms}
+
+
+@app.post("/api/kavach/demo-capacity")
+async def kavach_demo_capacity(request: Request):
+    """Switch the demo 'results-day server' (8 workers, slower database) on or off."""
+    if (err := _local_only(request)):
+        return err
+    body = await _json(request)
+    def num(key):
+        try:
+            return int(body[key]) if body.get(key) is not None else None
+        except (TypeError, ValueError):
+            return None
+    capacity.set_enabled(bool(body.get("enabled", not capacity.enabled())), num("workers"), num("db_ms"))
+    workers, db_ms = capacity.profile()
+    ledger.event("info", f"Demo: results-day server ON ({workers} workers, {db_ms} ms database)" if capacity.enabled()
+                 else "Demo: results-day server OFF (normal laptop server)", dedupe=False)
+    return {"server_demo": capacity.enabled(), "workers": workers, "db_ms": db_ms}
 
 
 @app.get("/api/kavach/incidents/{incident_id}/report")

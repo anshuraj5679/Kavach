@@ -60,6 +60,42 @@ EXTENSION_BASELINE_GRACE = 3    # seconds after the baseline in which a slow-loa
 BLOCK_SECONDS = 15 * 60        # how long an IP + device stays blocked
 FREEZE_SECONDS = 30 * 60        # how long a frozen account needs re-verification
 
+# availability shield (agent/availability.py): floods, results-day rush, health watchdog
+AVAILABILITY_SHIELD = True
+FLOOD_PER_SECOND = 25            # requests from one source in 1 s (a person clicking sends about 1)
+FLOOD_PER_10_SECONDS = 150       # ... or in 10 s
+FLOOD_BLOCK_SECONDS = 60         # how long a flooding source is refused (HTTP 429)
+# Requests WITHOUT a device cookie are counted together per IP (bots that drop cookies get a
+# new device on every request). Real first-time visitors share that count only for their very
+# first request, and many of them can sit behind one campus Wi-Fi IP, so the limit is higher.
+FLOOD_COOKIELESS_PER_SECOND = 100
+FLOOD_COOKIELESS_PER_10_SECONDS = 600
+# Fair share: while the portal is busy, one source sending at least FLOOD_SHARE_MIN_RPS and taking
+# FLOOD_SHARE of all traffic is a flood (300 students on separate devices are about 0.3% each).
+FLOOD_BUSY_INFLIGHT = 8
+FLOOD_SHARE = 0.15
+FLOOD_SHARE_MIN_RPS = 10
+# Too many open at once: requests from one source in progress at the same moment.
+FLOOD_MAX_OPEN = 8               # a person's page has at most about 4
+FLOOD_COOKIELESS_MAX_OPEN = 12   # first visits behind one campus Wi-Fi IP share this count
+LANES = {                        # path prefixes per lane; anything else is "standard"
+    "critical": ("/api/fees", "/fees", "/api/auth", "/student/login", "/logout", "/api/me"),
+    "results": ("/api/results",),
+    "deferrable": ("/api/library", "/api/admissions"),
+}
+RUSH_ENTER_INFLIGHT = 12         # requests in progress at once that switch rush mode on
+RUSH_ENTER_MS = 800              # ... or a p95 response time this slow (with real traffic)
+RUSH_EXIT_INFLIGHT = 3
+RUSH_CALM_SECONDS = 8            # calm this long before rush mode switches off
+RESULTS_SLOTS = 6                # results requests served at once during rush mode (the demo server has 8
+                                 # workers, so 2 stay free for fees and login); the rest queue fairly
+RESULTS_CACHE_SECONDS = 60       # published results do not change: serve repeats from a short cache
+QUEUE_HOLD_SECONDS = 8           # a results request waits quietly in line this long before 'please wait'
+HEALTH_INTERVAL = 1.0            # watchdog check every second
+HEALTH_SLOW_MS = 800
+HEALTH_DOWN_MS = 3000
+HEALTH_HISTORY = 180             # points kept for the dashboard chart (3 minutes)
+
 # session guard (features 2 and 3)
 IDLE_TIMEOUT_SECONDS = 10 * 60          # any session
 UNTRUSTED_IDLE_SECONDS = 3 * 60         # session on a device the student never confirmed
@@ -116,6 +152,8 @@ RISK_WEIGHTS = {
     "untrusted_expired": 20,
     "extension": 45,
     "download_link": 50,
+    "flood": 60,
+    "rush": 40,
     "anomaly": 15,
 }
 SEVERITY_BANDS = [(80, "critical"), (60, "high"), (35, "medium"), (0, "low")]
