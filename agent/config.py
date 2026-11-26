@@ -78,6 +78,8 @@ FLOOD_SHARE_MIN_RPS = 10
 # Too many open at once: requests from one source in progress at the same moment.
 FLOOD_MAX_OPEN = 8               # a person's page has at most about 4
 FLOOD_COOKIELESS_MAX_OPEN = 12   # first visits behind one campus Wi-Fi IP share this count
+FLOOD_TARPIT_SECONDS = 3         # a refused flooding connection is held this long before its 429
+FLOOD_TARPIT_MAX = 300           # at most this many held at once (then refused straight away)
 LANES = {                        # path prefixes per lane; anything else is "standard"
     "critical": ("/api/fees", "/fees", "/api/auth", "/student/login", "/logout", "/api/me"),
     "results": ("/api/results",),
@@ -87,6 +89,7 @@ RUSH_ENTER_INFLIGHT = 12         # requests in progress at once that switch rush
 RUSH_ENTER_MS = 800              # ... or a p95 response time this slow (with real traffic)
 RUSH_EXIT_INFLIGHT = 3
 RUSH_CALM_SECONDS = 8            # calm this long before rush mode switches off
+RUSH_MIN_SOURCES = 10            # a rush means at least this many different students (not a few bots)
 RESULTS_SLOTS = 6                # results requests served at once during rush mode (the demo server has 8
                                  # workers, so 2 stay free for fees and login); the rest queue fairly
 RESULTS_CACHE_SECONDS = 60       # published results do not change: serve repeats from a short cache

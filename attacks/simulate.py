@@ -11,6 +11,7 @@ own fake attacker IP (X-Forwarded-For) so blocking one does not hide the next.
                                                 #              lockout | bruteforce | hijack
 
     Availability scenarios (not part of "all"):
+    python attacks/simulate.py bots             # live: start bots, use the portal in a browser, Ctrl+C to stop
     python attacks/simulate.py flood --compare  # a bot flood while a real student uses Results
     python attacks/simulate.py rush --compare   # results day: 300 real students at once while one pays fees
 
@@ -408,6 +409,32 @@ async def _pay_fees(base: str, stop: asyncio.Event, samples: list) -> None:
             await asyncio.sleep(1.0)
 
 
+BOT_PATHS = ["/api/stats", "/api/admissions/search?q=an"]      # database pages: the expensive kind
+BOT_IPS = [f"10.99.0.{i + 10}" for i in range(FLOOD_BOTS)]
+
+
+def _bot_loop(base: str, ip: str, stop, st: dict, lock, limit: int | None = None) -> None:
+    """One bot connection: requests database pages back to back and drops its cookies every time."""
+    cl = Client(base, ip, "flood-bot")
+    cl.http.timeout = httpx.Timeout(30)
+    i = 0
+    try:
+        while not stop.is_set() and (limit is None or st["sent"] < limit):
+            cl.http.cookies.clear()                     # a bot that drops cookies
+            try:
+                r = cl.get(BOT_PATHS[i % len(BOT_PATHS)])
+            except httpx.HTTPError:
+                with lock:
+                    st["timeouts"] += 1
+                continue
+            i += 1
+            with lock:
+                st["sent"] += 1
+                st["refused" if r.status_code in (403, 429) else "served"] += 1
+    finally:
+        cl.close()
+
+
 def _flood(base: str) -> dict:
     """Bots run in threads: one Python process juggling many asyncio connections stalls on
     Windows long before the server does, so threads give a realistic flood."""
@@ -434,26 +461,6 @@ def _flood(base: str) -> dict:
         finally:
             cl.close()
 
-    def bot(ip: str, stop: threading.Event) -> None:
-        cl = Client(base, ip, "flood-bot")
-        cl.http.timeout = httpx.Timeout(10)
-        paths, i = ["/api/stats", "/api/admissions/search?q=an", "/"], 0      # database-heavy pages
-        try:
-            while not stop.is_set() and st["sent"] < FLOOD_MAX:
-                cl.http.cookies.clear()                 # a bot that drops cookies
-                try:
-                    r = cl.get(paths[i % 3])
-                except httpx.HTTPError:
-                    with lock:
-                        st["timeouts"] += 1
-                    continue
-                i += 1
-                with lock:
-                    st["sent"] += 1
-                    st["refused" if r.status_code in (403, 429) else "served"] += 1
-        finally:
-            cl.close()
-
     before, during = [], []
     stop = threading.Event()
     w = threading.Thread(target=watch, args=(stop, before), daemon=True)
@@ -463,8 +470,9 @@ def _flood(base: str) -> dict:
     w.join()
 
     stop = threading.Event()
-    ips = [f"10.99.0.{i + 10}" for i in range(FLOOD_BOTS)]
-    threads = [threading.Thread(target=bot, args=(ip, stop), daemon=True) for ip in ips for _ in range(FLOOD_CONNECTIONS)]
+    ips = BOT_IPS
+    threads = [threading.Thread(target=_bot_loop, args=(base, ip, stop, st, lock, FLOOD_MAX), daemon=True)
+               for ip in ips for _ in range(FLOOD_CONNECTIONS)]
     threads.append(threading.Thread(target=watch, args=(stop, during), daemon=True))
     t0 = time.time()
     for t in threads:
@@ -570,6 +578,63 @@ def attack_rush(base: str) -> dict:
 EXTRA = {"flood": attack_flood, "rush": attack_rush}
 
 
+def run_bots(base: str, minutes: float, real_server: bool) -> None:
+    """Live demo: start the bot flood and keep it going until Ctrl+C (or the time limit), while
+    you use the portal in a browser and flip the agent switch on the dashboard."""
+    import threading
+    st = {"sent": 0, "refused": 0, "served": 0, "timeouts": 0}
+    lock, stop = threading.Lock(), threading.Event()
+    if not real_server:
+        try:
+            prof = httpx.post(base + "/api/kavach/demo-capacity", json={"enabled": True, **SERVER_PROFILE["flood"]},
+                              timeout=5).json()
+            info(f"results-day server ON: {prof.get('workers', '?')} workers, {prof.get('db_ms', '?')} ms database "
+                 f"(a small, busy college server; --real-server to skip)")
+        except httpx.HTTPError:
+            pass
+    threads = [threading.Thread(target=_bot_loop, args=(base, ip, stop, st, lock), daemon=True)
+               for ip in BOT_IPS for _ in range(FLOOD_CONNECTIONS)]
+    for t in threads:
+        t.start()
+    print()
+    print(c("=" * 78, DIM))
+    print(c(f"  BOTS STARTED: {len(BOT_IPS)} bot machines x {FLOOD_CONNECTIONS} connections are flooding {base}", BOLD + ";" + RED))
+    print(c("=" * 78, DIM))
+    print("   Now open the portal in your browser and click around (Results, Fees, ...).")
+    print("   Agent OFF: every page takes about 15-20 seconds.  Agent ON: pages open at once.")
+    print(f"   Flip the agent switch on the dashboard: {base}/admin")
+    print(f"   Press Ctrl+C here to stop the bots (they stop by themselves after {minutes:g} min).")
+    print()
+    t0, last = time.time(), dict(st)
+    try:
+        while time.time() - t0 < minutes * 60:
+            time.sleep(5)
+            on = agent_state(base)
+            with lock:
+                now = dict(st)
+            d_served, d_refused = now["served"] - last["served"], now["refused"] - last["refused"]
+            last = now
+            secs = int(time.time() - t0)
+            label = c("agent ON ", GREEN) if on else c("agent OFF", RED)
+            print(f"   [{secs // 60:02d}:{secs % 60:02d}] {label} | last 5 s: {d_served:>4} bot requests served by the "
+                  f"portal, {d_refused:>5} refused by Kavach", flush=True)
+        print(c(f"\n   Time limit reached ({minutes:g} min).", AMBER))
+    except KeyboardInterrupt:
+        print(c("\n   Stopping the bots...", AMBER))
+    finally:
+        stop.set()
+        if not real_server:
+            try:
+                httpx.post(base + "/api/kavach/demo-capacity", json={"enabled": False}, timeout=5)
+            except httpx.HTTPError:
+                pass
+        for t in threads:
+            t.join(timeout=1)
+        print(c(f"   BOTS STOPPED. In total: {st['sent']} bot requests, {st['served']} served by the portal, "
+                f"{st['refused']} refused by Kavach.", BOLD))
+        print(c(f"   Dashboard: {base}/admin", DIM))
+
+
 def print_extra_compare(name: str, off: dict, on: dict) -> None:
     who = "Results page opens in" if name == "flood" else "student paying fees"
     rows = [(f"{who}: median", _fmt_ms(off["student_ms"]), _fmt_ms(on["student_ms"])),
@@ -644,11 +709,12 @@ def print_compare(off: list[dict], on: list[dict]) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Kavach attack simulator (localhost only)")
-    ap.add_argument("attack", choices=list(ATTACKS) + ["all"] + list(EXTRA))
+    ap.add_argument("attack", choices=list(ATTACKS) + ["all"] + list(EXTRA) + ["bots"])
     ap.add_argument("--target", default="http://127.0.0.1:8000", help="portal URL (must be localhost)")
     ap.add_argument("--compare", action="store_true", help="with 'all', 'flood' or 'rush': run with the agent OFF, then ON")
     ap.add_argument("--no-reset", action="store_true", help="with 'all': don't clear the ledger / lockouts first")
     ap.add_argument("--reset", action="store_true", help="clear the ledger / lockouts before a single attack")
+    ap.add_argument("--minutes", type=float, default=10, help="bots: stop by themselves after this many minutes")
     ap.add_argument("--real-server", action="store_true",
                     help="flood / rush: do not switch on the demo results-day server (8 workers, slower database)")
     args = ap.parse_args()
@@ -657,6 +723,10 @@ def main() -> None:
     state = agent_state(base)
     if state is None:
         sys.exit(f"Cannot reach the portal at {base}. Start it first:  python run.py")
+
+    if args.attack == "bots":
+        run_bots(base, max(0.5, min(args.minutes, 60)), args.real_server)
+        return
 
     if args.attack in EXTRA:
         runs = (False, True) if args.compare else (state,)

@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import math
 import re
+import secrets
 import time
 from collections import OrderedDict, deque
 from contextlib import closing
@@ -65,7 +66,9 @@ class _State:
         self.reset()
 
     def reset(self) -> None:
-        self.inflight = {lane: 0 for lane in LANES}
+        # Requests in progress are facts about live requests: a reset keeps counting them, or the
+        # counts would go negative when those requests finish.
+        self.inflight = getattr(self, "inflight", None) or {lane: 0 for lane in LANES}
         self.done: deque = deque(maxlen=5000)          # (ts, ms, lane, status) of finished requests
         self.points: deque = deque(maxlen=config.HEALTH_HISTORY)
         self.status = "UP"
@@ -78,12 +81,13 @@ class _State:
         self.results_sem: asyncio.Semaphore | None = None  # results slots during rush mode (FIFO)
         self.cache: dict = {}                           # roll -> (ts, status, body, headers)
         self.hits: dict = {}                            # bucket -> deque of request times
-        self.open: dict = {}                            # bucket -> requests from it in progress right now
+        self.open: dict = getattr(self, "open", None) or {}   # bucket -> requests from it in progress now
         self.all_hits: deque = deque()                  # every counted request (for each source's share)
         self.flood_until: dict = {}                     # bucket -> refused until
         self.flood_inc: dict | None = None
         self.flood_sources: set = set()
         self.unflushed_blocked = 0
+        self.tarpit = 0                                 # refused bot connections being held right now
         self.c = {"flood_refused": 0, "queued": 0, "deferred": 0, "cache_hits": 0, "served_results": 0,
                   "critical_served": 0, "critical_ms": 0.0, "critical_max": 0.0}
 
@@ -104,12 +108,15 @@ async def middleware(request: Request, call_next):
     on = enabled()
     held = None                                         # results slot taken during rush mode
 
-    bucket = None
+    # Which source sent it, and how many it has open, is counted even with the agent OFF (pure
+    # bookkeeping, nothing is done with it), so the moment the agent is switched ON a bot that
+    # has been flooding for a while is recognised by its very next request.
+    bucket = _source(request)[0]
+    request.state.flood_bucket = bucket
     if on:
         refused, bucket = _flood_check(request, path)
         if refused is not None:
             return refused
-        request.state.flood_bucket = bucket
         if S.rush:
             if lane == "deferrable":
                 S.c["deferred"] += 1
@@ -136,13 +143,16 @@ async def middleware(request: Request, call_next):
     finally:
         S.inflight[lane] -= 1
         if bucket:
-            S.open[bucket] -= 1
-            if S.open[bucket] <= 0:
+            left = S.open.get(bucket, 0) - 1
+            if left > 0:
+                S.open[bucket] = left
+            else:
                 S.open.pop(bucket, None)
         if held is not None:
             held.release()
     ms = (time.perf_counter() - t0) * 1000
-    S.done.append((time.time(), ms, lane, resp.status_code))
+    flagged = bool(bucket and S.flood_until.get(bucket, 0) > time.time())
+    S.done.append((time.time(), ms, "flood" if flagged else lane, resp.status_code, bucket))
     if lane == "critical":
         S.c["critical_served"] += 1
         S.c["critical_ms"] += ms
@@ -169,22 +179,49 @@ async def flood_gate(request: Request, call_next):
         if until and until > time.time():
             S.c["flood_refused"] += 1
             S.unflushed_blocked += 1
+            # Tarpit: hold the refused connection a few seconds (costs nothing while waiting), so a
+            # bot that retries the instant it is refused sends ~20 requests/s instead of ~1,500.
+            if S.tarpit < config.FLOOD_TARPIT_MAX:
+                S.tarpit += 1
+                try:
+                    await asyncio.sleep(max(0.0, min(config.FLOOD_TARPIT_SECONDS, until - time.time())))
+                finally:
+                    S.tarpit -= 1
             s = max(1, math.ceil(until - time.time()))
-            return JSONResponse({"blocked": True, "by": "Kavach", "code": "flood", "retry_after": s,
+            resp = JSONResponse({"blocked": True, "by": "Kavach", "code": "flood", "retry_after": s,
                                  "reason": f"Too many requests from your connection: Kavach is protecting the portal "
                                            f"from a traffic flood. Try again in {s} seconds."},
                                 status_code=429, headers={"Retry-After": str(s)})
+            if not DEVICE_RX.match(device):
+                # A real browser behind the same IP keeps this cookie and is then judged on its own;
+                # bots that drop cookies stay in the refused group.
+                resp.set_cookie(auth.DEVICE_COOKIE, secrets.token_urlsafe(18), max_age=400 * 24 * 3600,
+                                httponly=True, samesite="lax")
+            return resp
     return await call_next(request)
 
 
+def priority(request: Request) -> bool:
+    """For the server's waiting line (agent ON only): the critical lane (login, fees, receipts) and
+    logged-in students go ahead of anonymous traffic."""
+    if not enabled():
+        return False
+    return (lane_of(request.url.path) == "critical"
+            or auth.get_session(request.cookies.get(auth.SESSION_COOKIE)) is not None)
+
+
 # ---------------------------------------------------------------- flood shield
-def _flood_check(request: Request, path: str):
+def _source(request: Request) -> tuple[str, bool, str, str]:
+    """(bucket, has_cookie, ip, device). Browsers keep their device cookie; bots that drop cookies
+    get a new device on every request, so those are counted together per IP instead."""
     ip = getattr(request.state, "ip", None) or (request.client.host if request.client else "?")
     device = getattr(request.state, "device", "")
-    # Browsers keep their device cookie; bots that drop cookies get a new device on every
-    # request, so those are counted together per IP instead.
     has_cookie = bool(DEVICE_RX.match(request.cookies.get(auth.DEVICE_COOKIE, "") or ""))
-    bucket = f"dev|{ip}|{device}" if has_cookie else f"nocookie|{ip}"
+    return (f"dev|{ip}|{device}" if has_cookie else f"nocookie|{ip}"), has_cookie, ip, device
+
+
+def _flood_check(request: Request, path: str):
+    bucket, has_cookie, ip, device = _source(request)
     now = time.time()
     until = S.flood_until.get(bucket)
     if until and until > now:
@@ -213,11 +250,15 @@ def _flood_check(request: Request, path: str):
     # fixed speed limit is never reached. One source taking a big slice of all traffic is a flood.
     share = n5 / len(S.all_hits) if S.all_hits else 0.0
     busy = sum(S.inflight.values()) >= config.FLOOD_BUSY_INFLIGHT or S.status != "UP"
-    greedy = busy and n5 / 5 >= config.FLOOD_SHARE_MIN_RPS and share >= config.FLOOD_SHARE
+    # The share and open-at-once rules are for anonymous traffic. A logged-in student who keeps
+    # clicking refresh on a slow portal piles up waiting requests too, and must never be blocked
+    # for it; they are held to the speed limits above, which no person reaches.
+    student = auth.get_session(request.cookies.get(auth.SESSION_COOKIE)) is not None
+    greedy = (not student and busy and n5 / 5 >= config.FLOOD_SHARE_MIN_RPS and share >= config.FLOOD_SHARE)
     # Too many open at once: a person's page has at most about 4 requests in progress, a bot
     # holds many connections open. Works even when a slow server caps how fast anyone can send.
     open_now = S.open.get(bucket, 0) + 1
-    hoarding = open_now > (config.FLOOD_MAX_OPEN if has_cookie else config.FLOOD_COOKIELESS_MAX_OPEN)
+    hoarding = not student and open_now > (config.FLOOD_MAX_OPEN if has_cookie else config.FLOOD_COOKIELESS_MAX_OPEN)
     if n1 <= per_1 and len(dq) <= per_10 and not greedy and not hoarding:
         return None, bucket
 
@@ -252,10 +293,13 @@ def _flood_check(request: Request, path: str):
 
 
 def flooding(request: Request) -> bool:
-    """Is this request's source marked as flooding? Lets requests already waiting in line be dropped."""
-    bucket = getattr(request.state, "flood_bucket", None)
-    until = S.flood_until.get(bucket) if bucket else None
-    return bool(until and until > time.time() and enabled())
+    """Is this request's source marked as flooding? Lets requests already waiting in line be
+    dropped, including ones that joined the line while the agent was still OFF."""
+    if not S.flood_until or not enabled():
+        return False
+    bucket = getattr(request.state, "flood_bucket", None) or _source(request)[0]
+    until = S.flood_until.get(bucket)
+    return bool(until and until > time.time())
 
 
 def _too_many(request: Request, seconds: float):
@@ -377,7 +421,9 @@ async def _tick() -> None:
         failed = True
     probe_ms = (time.perf_counter() - t0) * 1000
     win = _window(5)
-    pages = [d for d in win if d[3] not in (429, 503)]
+    now = time.time()
+    pages = [d for d in win if d[3] not in (429, 503) and d[2] != "flood"     # real users only: not from a
+             and not (d[4] and S.flood_until.get(d[4], 0) > now)]             # source marked as flooding
     p95 = _p95([d[1] for d in pages])
     rps = len(win) / 5
     errors = sum(1 for d in win if d[3] >= 500 and d[3] != 503)
@@ -400,7 +446,8 @@ async def _tick() -> None:
         S.status = status
 
     if on:
-        _rush_decide(inflight, p95, rps, len(win))
+        sources = {d[4] for d in pages if d[4]} | {b for b in S.open if S.flood_until.get(b, 0) <= time.time()}
+        _rush_decide(inflight, p95, rps, len(pages), len(sources))
         if S.unflushed_blocked:
             ledger.bump("blocked", S.unflushed_blocked)
             S.unflushed_blocked = 0
@@ -408,9 +455,11 @@ async def _tick() -> None:
         _rush_off("the agent was switched OFF")
 
 
-def _rush_decide(inflight: int, p95: float, rps: float, n: int) -> None:
+def _rush_decide(inflight: int, p95: float, rps: float, n: int, sources: int = 0) -> None:
     now = time.time()
-    busy = inflight >= config.RUSH_ENTER_INFLIGHT or (n >= 20 and p95 >= config.RUSH_ENTER_MS)
+    # A rush is MANY different students; a few machines sending a lot is a flood, not a rush.
+    busy = ((inflight >= config.RUSH_ENTER_INFLIGHT or (n >= 20 and p95 >= config.RUSH_ENTER_MS))
+            and sources >= config.RUSH_MIN_SOURCES)
     if not S.rush:
         if busy:
             S.rush, S.rush_since, S.calm_since = True, now, 0.0

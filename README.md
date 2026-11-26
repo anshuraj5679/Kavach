@@ -88,10 +88,10 @@ python attacks/simulate.py all
 
 Watch the dashboard fill in live:
 
-* **Scraping**: the first changed `?roll=` is refused. **No marks get out**, Rahul's device is blocked, and the student whose record was targeted is told.
+* **Scraping**: the first changed `?roll=` is refused. **No marks get out**, the attempt is recorded, and the student whose record was targeted is told. Rahul's own pages keep working.
 * **Over-exposure**: phone, Aadhaar and address **masked in flight**; the 420-row dump **stopped**.
 * **SQL injection**: blocked **before the database was touched**.
-* **Receipt IDOR**: refused on the first try, and the device is blocked.
+* **Receipt IDOR**: refused on the first try, and every try after it.
 * **Lockout attack**: the attacker is blocked after 5 tries, before the portal's own 10-try lock. **The real Priya still logs in.** A classmate on the same Wi-Fi IP, on her own device, logs in fine too.
 * **Password guessing**: blocked after 5 guesses.
 * **Session hijack**: a cookie replayed from another device is rejected.
@@ -129,7 +129,7 @@ Every allow, mask or block decision comes from the deterministic thresholds in `
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `OWNERSHIP_ZERO_TOLERANCE` | True | on **every page and API**: a link carrying another student's ID (`roll`, `usn`, `userId`, `student`, … in any case, even repeated) or another student's challan / receipt number is refused on the first try, the IP + device is blocked and the record's owner is told. Set False for the older rule below |
+| `OWNERSHIP_ZERO_TOLERANCE` | True | on **every page and API**: a link carrying another student's ID (`roll`, `usn`, `userId`, `student`, … in any case, even repeated) or another student's challan / receipt number is refused on the first try (and on every try after it), recorded, and the IT head and the record's owner are told, once per attacker and target. The device is not blocked, so the student's own pages keep working. Set False for the older rule below |
 | `FOREIGN_RECORD_LIMIT` | 3 | (only when zero tolerance is off) other people's records an actor may see in the window before being blocked |
 | `ROW_SPIKE_LIMIT` | 100 | other people's rows in one response that count as a mass dump (response stopped) |
 | `FAILED_LOGIN_LIMIT` | 5 | wrong tries per IP + device (the portal's own lock is at 10) |
@@ -151,12 +151,22 @@ The problem statement says portals *"go down at the worst possible moment"* and 
 
 | Traffic | Example | What Kavach does (agent ON) |
 |---|---|---|
-| **Bad: a flood** | A few bot machines sending far more requests than any person | Refuses a source that goes over a speed limit, **or** keeps more than 8 requests open at once (a person's page has about 4), **or** takes more than 15% of all traffic while the portal is busy. Refused for 60 s with HTTP 429, at the door, before any inspection or database work, and its requests already waiting for the server are dropped |
+| **Bad: a flood** | A few bot machines sending far more requests than any person | Refuses a source that goes over a speed limit, **or** keeps more than 8 requests open at once (a person's page has about 4), **or** takes more than 15% of all traffic while the portal is busy. Refused for 60 s with HTTP 429, at the door, before any inspection or database work, and its requests already waiting for the server are dropped. Each refusal is held for 3 s (a *tarpit*), so a bot that retries instantly sends about 20 requests/s instead of about 1,500. When the server is busy, logged-in students and the critical lane (login, fees, receipts) go to the front of its line, so bots that slip in before they are spotted cannot delay real students |
 | **Good: a rush** | Results are published and hundreds of real students open them at once | **Never blocks anyone.** Switches **rush mode** on by itself: fee payment, receipts and login keep a reserved lane, results queue fairly (one place per student, however often they refresh, with a *"You're number N in line"* banner and automatic retry), library and admissions search are paused. Kavach also pauses its own optional anomaly model. Rush mode switches off when traffic is calm again |
 
-**Portal health panel** (dashboard, under the totals): Up / Slow / Down, response time, requests per second, requests in progress, results queue, fee-lane speed and flood refusals, with a 3-minute chart in which rush mode is shaded. The IT head gets an alert when the portal turns Slow or Down, and each flood and rush gets an incident with a report.
+**Portal health panel** (dashboard, under the totals): Up / Slow / Down, response time, requests per second, requests in progress, results queue, fee-lane speed and flood refusals, with a 3-minute chart in which rush mode is shaded. Response time measures real users: requests from sources marked as flooding are left out. Rush mode only switches on for a real crowd (at least 10 different sources), never for a few flooding machines. The IT head gets an alert when the portal turns Slow or Down, and each flood and rush gets an incident with a report.
 
 **Demo: results-day server.** On a laptop the demo portal answers in 1 to 2 ms, so a few hundred students hardly strain it. The *Results-day server (demo)* switch in the panel (`app/capacity.py`, off by default) makes it behave like a real campus server: 8 workers and a database that takes about 100 ms per query. It simulates only the server; Kavach's lanes, queue and flood blocking are real. The simulator switches it on for its runs (`--real-server` to skip): the rush uses that mid-size server, and the flood uses a small, busy one (2 workers, 250 ms database), so the difference shows in a browser.
+
+**Live demo in a browser:**
+
+```bash
+python attacks/simulate.py bots             # prints BOTS STARTED, keeps flooding until Ctrl+C (10 min at most)
+```
+
+With the bots running and the agent OFF, every page you open in the browser takes about 15 to 20 seconds. Switch the agent ON from the dashboard while the bots keep running, and pages open in about 0.3 seconds, however often you click. The terminal prints a status line every 5 seconds: bot requests served by the portal (agent OFF) or refused by Kavach (agent ON). Kavach counts each source's open requests even while the agent is OFF (bookkeeping only), so the bots are recognised by their very next request once it is switched ON. Their requests already waiting in the server's line are dropped, and logged-in students go to the front of the line. A logged-in student who keeps clicking refresh is never mistaken for a bot.
+
+**Timed comparisons:**
 
 ```bash
 python attacks/simulate.py rush --compare    # 300 students open results at once while Sneha pays her fees
@@ -167,10 +177,11 @@ Measured on the development laptop (numbers vary from run to run and machine to 
 
 | | Agent OFF | Agent ON |
 |---|---|---|
-| Rush: fee payment, median (300 students) | about 7.5 s | about 0.25 s |
+| Rush: fee payment, median (300 students) | about 7.5 to 8 s | about 0.25 s |
 | Rush: first result, median | about 2.3 s | about 3.1 s (fair queue) |
-| Flood: real student opening the whole Results page, median | about 10.5 to 11 s | about 0.1 to 0.3 s |
-| Flood: bot requests that got through (30 s flood) | about 310 | 4 or 5 |
+| Flood: real student opening the whole Results page, median | about 16 to 17 s | about 0.29 s (the same as with no flood) |
+| Flood: bot requests that got through (30 s flood) | about 250 | about 15 |
+| Flood: portal health during the flood | Slow / Down | Up the whole time |
 
 `flood` and `rush` are not part of `all`, so the 7-attack comparison above is unchanged. Limits: this protects the website itself. A very large real-world attack, from millions of machines, is stopped earlier by network services such as a CDN.
 
@@ -220,10 +231,10 @@ Each is marked `# WEAK SPOT` in the code, with a `# SAFE VERSION:` comment showi
 
 | # | Where | Flaw | What Kavach does |
 |---|---|---|---|
-| 1 | `app/portal.py` → `api_results` | IDOR: `?roll=` is never checked against the session | zero tolerance: first foreign `?roll=` refused, IP + device blocked, owner notified |
+| 1 | `app/portal.py` → `api_results` | IDOR: `?roll=` is never checked against the session | zero tolerance: every foreign `?roll=` refused and recorded, owner notified; own pages keep working |
 | 2 | `app/portal.py` → `api_library_borrowers` | `SELECT *` sends phone/Aadhaar/address the page never shows; no `?limit=` cap | masks PII in flight; stops dumps over 100 rows |
 | 3 | `app/portal.py` → `api_admissions_search` | SQL built by string concatenation; raw DB errors echoed | blocks the pattern before the DB |
-| 4 | `app/portal.py` → `api_fee_receipt` | IDOR on `?userId=`, plus `SELECT *` leaks Aadhaar and password | zero tolerance: first foreign `?userId=` refused, IP + device blocked, owner notified |
+| 4 | `app/portal.py` → `api_fee_receipt` | IDOR on `?userId=`, plus `SELECT *` leaks Aadhaar and password | zero tolerance: every foreign `?userId=` refused and recorded, owner notified; own pages keep working |
 | 4b | `app/portal.py` → `api_fee_receipt_download` | The *Generate receipt* PDF is a plain GET link that works in any tab or site it is dragged or pasted into | scrambles the link on the page, downloads only with a one-time tab ticket, logs drags and refused opens |
 | 6 | `app/portal.py` → `api_acknowledgement_download` | Course acknowledgement PDF: student taken from `?userId=` (IDOR) and a plain GET link that works in any tab | refuses foreign acknowledgements, scrambles the link, downloads only with a one-time tab ticket |
 | 5 | `app/auth.py`, `app/portal.py` | DOB passwords, ID-card number as "second factor", per-USN lockout, sessions never expire and aren't bound to a device | lockout shield, session guard, untrusted devices |

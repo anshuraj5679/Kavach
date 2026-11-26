@@ -298,38 +298,40 @@ async def _guard(request: Request, call_next, ip: str, device: str, path: str):
 # ------------------------------------------------------------------------- helpers
 def _ownership_blocked(request: Request, path: str, ip: str, device: str, actor_key: str, actor: dict,
                        who: str, mm: dict):
-    """Zero tolerance: someone else's roll / userId in the link. Refuse before anything is read,
-    block the IP + device, and tell the IT head and the record's owner."""
+    """Zero tolerance: someone else's roll / userId in the link. Refuse THAT request before anything
+    is read, record it, and tell the IT head and the record's owner. The device is NOT blocked, so the
+    student's own pages keep working; every further attempt at someone else's record is refused too."""
     kind, doc = config.OWNED_RECORDS.get(path, ("idor_probe", "records"))
     asked, param = mm["requested"], mm["param"]
     owner = _name(asked)
     target = f"{owner} ({asked})" if owner else f"USN {asked}"
     inc = ledger.incident(kind, actor_key, f"IDOR blocked: {who} tried to open the {doc} of {target}", path, actor)
     risk, sev = detector.score(["foreign_over_limit", "ownership_mismatch"])
-    actions.block_actor(ip, device, f"Tried to open the {doc} of {target}", inc)
+    tries = detector.hit("idor_try", actor_key)
     ledger.update_incident(inc, risk=risk, severity=sev, protected=1, actor=actor,
-                           action=f"Refused before any data was read; IP + device blocked "
-                                  f"{config.BLOCK_SECONDS // 60} min",
+                           action="Refused before any data was read; the student's own pages keep working",
                            reasons=[(f"{who} put challan/receipt {mm['ref']} (owned by {target}) in ?{param}= on {path}"
                                      if mm.get("ref") else
                                      f"{who} changed ?{param}= in the link on {path} from {mm['own']} to {asked}"),
-                                    "Zero tolerance: a student may only open their own records, so the first "
-                                    "attempt is blocked and nothing leaves the server"],
+                                    "Zero tolerance: a student may only open their own records, so every attempt "
+                                    "is refused and nothing leaves the server"],
                            evidence=[{"param": param, "asked_for": asked, "own": mm["own"]}])
     ledger.bump("blocked")
     ledger.bump("protected")
-    ledger.event("block", f"IDOR blocked: {who} asked for the {doc} of {target} via ?{param}=: refused, "
-                          f"device blocked", inc["id"], dedupe=False)
-    notify.it_head("idor", f"IDOR blocked: {mm['own']} tried to open {asked}'s {doc}",
-                   f"{who} changed ?{param}= in the link from IP {ip}. Nothing was shown; device blocked.")
-    if owner:
-        notify.student(asked, "idor_attempt", f"Someone tried to open your {doc}",
-                       f"At {time.strftime('%H:%M')} another logged-in student changed a link to open your {doc}. "
-                       f"Kavach blocked it before anything was shown, and blocked their device. "
-                       f"Nothing of yours was exposed.")
+    ledger.event("block", f"IDOR blocked: {who} asked for the {doc} of {target} via ?{param}=: refused "
+                          f"({tries} attempt{'s' if tries != 1 else ''} in {config.WINDOW_SECONDS // 60} min)",
+                 inc["id"], dedupe=False)
+    # Alert once per attacker and target within the window, not on every repeated click.
+    if detector.hit("idor_alert", f"{mm['own']}|{asked}") == 1:
+        notify.it_head("idor", f"IDOR blocked: {mm['own']} tried to open {asked}'s {doc}",
+                       f"{who} changed ?{param}= in the link from IP {ip}. Nothing was shown.")
+        if owner:
+            notify.student(asked, "idor_attempt", f"Someone tried to open your {doc}",
+                           f"At {time.strftime('%H:%M')} another logged-in student changed a link to open your {doc}. "
+                           f"Kavach blocked it before anything was shown. Nothing of yours was exposed.")
     return actions.blocked_response(request, f"Kavach blocked this: you can only open your own {doc}. This attempt "
-                                    f"was recorded and this device is blocked for {config.BLOCK_SECONDS // 60} "
-                                    f"minutes.", inc["id"], code="ownership")
+                                    f"was recorded and reported. Your own pages still work.", inc["id"],
+                                    code="ownership")
 
 
 def _rebuild(resp: Response, body: bytes) -> Response:

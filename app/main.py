@@ -35,6 +35,7 @@ app.middleware("http")(availability.middleware)         # floods, results-day ru
 app.middleware("http")(gateway.kavach_gateway)          # every request and response passes through Kavach
 app.middleware("http")(availability.flood_gate)         # sources already flooding: refused before inspection
 capacity.drop_check = availability.flooding             # queued requests of a flooding source are dropped
+capacity.priority_check = availability.priority         # logged-in students ahead of anonymous traffic (agent ON)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
